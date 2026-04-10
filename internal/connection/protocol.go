@@ -1,0 +1,104 @@
+package connection
+
+// ---------------------------------------------------------------------------
+// Outbound messages (agent -> backend)
+// ---------------------------------------------------------------------------
+
+// RegisterMessage is sent on every WebSocket connect to identify the agent.
+type RegisterMessage struct {
+	Type         string `json:"type"`                    // "register"
+	HostID       string `json:"host_id,omitempty"`       // empty on first connect
+	Hostname     string `json:"hostname"`
+	Platform     string `json:"platform"`                // "windows" or "linux"
+	OsFamily     string `json:"os_family"`
+	OsVersion    string `json:"os_version"`
+	AgentVersion string `json:"agent_version"`
+}
+
+// HeartbeatMessage keeps the connection alive.
+type HeartbeatMessage struct {
+	Type string `json:"type"` // "heartbeat"
+}
+
+// ExecResultMessage reports the outcome of a command execution.
+type ExecResultMessage struct {
+	Type            string  `json:"type"` // "exec_result"
+	RequestID       string  `json:"request_id"`
+	Stdout          string  `json:"stdout"`
+	Stderr          string  `json:"stderr"`
+	ExitCode        int     `json:"exit_code"`
+	DurationSeconds float64 `json:"duration_seconds"`
+}
+
+// PtyOutputMessage carries PTY output back to the backend.
+type PtyOutputMessage struct {
+	Type      string `json:"type"` // "pty_output"
+	SessionID string `json:"session_id"`
+	Data      string `json:"data"` // base64-encoded
+}
+
+// PtyClosedMessage notifies the backend that a PTY session ended.
+type PtyClosedMessage struct {
+	Type      string `json:"type"` // "pty_closed"
+	SessionID string `json:"session_id"`
+	Reason    string `json:"reason"`
+}
+
+// ---------------------------------------------------------------------------
+// Inbound messages (backend -> agent)
+// ---------------------------------------------------------------------------
+
+// AckMessage confirms registration and assigns a host_id.
+type AckMessage struct {
+	Type   string `json:"type"` // "ack"
+	HostID string `json:"host_id"`
+}
+
+// ExecMessage requests command execution on the host.
+type ExecMessage struct {
+	Type              string `json:"type"` // "exec"
+	RequestID         string `json:"request_id"`
+	Command           string `json:"command"`
+	ExecutorName      string `json:"executor_name"` // powershell, bash, sh, command_prompt
+	ElevationRequired bool   `json:"elevation_required"`
+	TimeoutSeconds    int    `json:"timeout_seconds"`
+}
+
+// PtyOpenMessage requests a new interactive terminal session.
+type PtyOpenMessage struct {
+	Type      string `json:"type"` // "pty_open"
+	SessionID string `json:"session_id"`
+	TermType  string `json:"term_type"`
+	Cols      int    `json:"cols"`
+	Rows      int    `json:"rows"`
+}
+
+// PtyInputMessage carries user keystrokes to the PTY.
+type PtyInputMessage struct {
+	Type      string `json:"type"` // "pty_input"
+	SessionID string `json:"session_id"`
+	Data      string `json:"data"` // base64-encoded
+}
+
+// PtyResizeMessage requests a terminal size change.
+type PtyResizeMessage struct {
+	Type      string `json:"type"` // "pty_resize"
+	SessionID string `json:"session_id"`
+	Cols      int    `json:"cols"`
+	Rows      int    `json:"rows"`
+}
+
+// PtyCloseMessage requests closing an interactive terminal session.
+type PtyCloseMessage struct {
+	Type      string `json:"type"` // "pty_close"
+	SessionID string `json:"session_id"`
+}
+
+// ---------------------------------------------------------------------------
+// Generic envelope for initial type dispatch
+// ---------------------------------------------------------------------------
+
+// BaseMessage is used to peek at the "type" field before full deserialization.
+type BaseMessage struct {
+	Type string `json:"type"`
+}
