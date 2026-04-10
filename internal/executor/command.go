@@ -3,106 +3,62 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
-	"unicode/utf16"
 )
 
 const maxOutputBytes = 1 * 1024 * 1024 // 1 MB
 
-// WrapCommand prepares the raw command string for execution through the
-// appropriate shell or interpreter, mirroring the Python SSHExecutor logic.
-func WrapCommand(command string, executorName string, elevationRequired bool) string {
-	switch strings.ToLower(executorName) {
-	case "powershell":
-		return wrapPowerShell(command)
-	case "command_prompt":
-		return wrapCommandPrompt(command)
-	case "bash":
-		return wrapBash(command, elevationRequired)
-	case "sh":
-		return wrapSh(command, elevationRequired)
-	default:
-		return command
-	}
-}
-
-// wrapPowerShell encodes the command as UTF-16LE base64 for -EncodedCommand.
-func wrapPowerShell(command string) string {
-	// Prepend stream-silencing preferences.
-	preamble := "$ProgressPreference='SilentlyContinue';" +
-		"$WarningPreference='SilentlyContinue';\n"
-	full := preamble + command
-
-	// Encode to UTF-16LE.
-	runes := utf16.Encode([]rune(full))
-	buf := make([]byte, len(runes)*2)
-	for i, r := range runes {
-		buf[i*2] = byte(r)
-		buf[i*2+1] = byte(r >> 8)
-	}
-	encoded := base64.StdEncoding.EncodeToString(buf)
-
-	return fmt.Sprintf("powershell.exe -NoProfile -NonInteractive -EncodedCommand %s", encoded)
-}
-
-// wrapCommandPrompt creates a base64-encoded batch script, decoded via
-// PowerShell bootstrap into a temp file, then executed with cmd.exe /c.
-func wrapCommandPrompt(command string) string {
-	b64 := base64.StdEncoding.EncodeToString([]byte(command))
-
-	// PowerShell decodes the base64, writes a temp .bat, runs it, cleans up.
-	bootstrap := fmt.Sprintf(
-		`$b=[System.Convert]::FromBase64String('%s');`+
-			`$f=[System.IO.Path]::GetTempFileName()+'.bat';`+
-			`[System.IO.File]::WriteAllBytes($f,$b);`+
-			`cmd.exe /c $f;`+
-			`Remove-Item $f -Force`,
-		b64,
-	)
-
-	return fmt.Sprintf("powershell.exe -NoProfile -NonInteractive -Command \"%s\"", bootstrap)
-}
-
-// wrapBash base64-encodes the script and pipes it through bash.
-func wrapBash(command string, elevationRequired bool) string {
-	b64 := base64.StdEncoding.EncodeToString([]byte(command))
-	cmd := fmt.Sprintf("echo %s | base64 -d | /bin/bash", b64)
-	if elevationRequired {
-		cmd = "sudo " + cmd
-	}
-	return cmd
-}
-
-// wrapSh base64-encodes the script and pipes it through sh.
-func wrapSh(command string, elevationRequired bool) string {
-	b64 := base64.StdEncoding.EncodeToString([]byte(command))
-	cmd := fmt.Sprintf("echo %s | base64 -d | /bin/sh", b64)
-	if elevationRequired {
-		cmd = "sudo " + cmd
-	}
-	return cmd
-}
-
-// ExecuteCommand runs the wrapped command with the given timeout.
-// Returns stdout, stderr, exit code, duration in seconds, and any error.
-func ExecuteCommand(ctx context.Context, wrappedCmd string, timeoutSec int) (stdout string, stderr string, exitCode int, duration float64, err error) {
+// ExecuteCommand runs a command through the specified shell WITHOUT encoding.
+//
+// Commands are executed in plain text so that detection rules (EDR, Sysmon,
+// Sentinel) can see the actual command line in process creation events.
+// This is critical for atomic test validation — base64-encoded commands
+// are invisible to most detection rules.
+//
+// Shell dispatch:
+//   - powershell  → powershell.exe -NoProfile -Command "<command>"
+//   - command_prompt → writes temp .bat file, runs cmd.exe /c <file>
+//   - bash → /bin/bash -c "<command>"
+//   - sh   → /bin/sh -c "<command>"
+func ExecuteCommand(ctx context.Context, command string, executorName string, elevationRequired bool, timeoutSec int) (stdout string, stderr string, exitCode int, duration float64, err error) {
 	if timeoutSec <= 0 {
-		timeoutSec = 300 // Default 5 minutes.
+		timeoutSec = 300
 	}
 
 	cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(cmdCtx, "cmd.exe", "/C", wrappedCmd)
-	} else {
-		cmd = exec.CommandContext(cmdCtx, "/bin/sh", "-c", wrappedCmd)
+
+	switch strings.ToLower(executorName) {
+	case "powershell":
+		cmd = buildPowerShellCmd(cmdCtx, command)
+
+	case "command_prompt":
+		cmd, err = buildCmdPromptCmd(cmdCtx, command)
+		if err != nil {
+			return "", "", 1, 0, fmt.Errorf("failed to prepare cmd script: %w", err)
+		}
+
+	case "bash":
+		cmd = buildBashCmd(cmdCtx, command, elevationRequired)
+
+	case "sh":
+		cmd = buildShCmd(cmdCtx, command, elevationRequired)
+
+	default:
+		// Unknown executor — try to run directly
+		if runtime.GOOS == "windows" {
+			cmd = exec.CommandContext(cmdCtx, "cmd.exe", "/C", command)
+		} else {
+			cmd = exec.CommandContext(cmdCtx, "/bin/sh", "-c", command)
+		}
 	}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -116,13 +72,12 @@ func ExecuteCommand(ctx context.Context, wrappedCmd string, timeoutSec int) (std
 	stdout = truncate(stdoutBuf.String(), maxOutputBytes)
 	stderr = truncate(stderrBuf.String(), maxOutputBytes)
 
-	// Determine exit code.
 	exitCode = 0
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else if cmdCtx.Err() == context.DeadlineExceeded {
-			exitCode = 124 // Standard timeout exit code.
+			exitCode = 124
 			stderr = truncate(stderr+"\n[TIMEOUT] Command exceeded "+fmt.Sprintf("%d", timeoutSec)+"s limit", maxOutputBytes)
 			err = fmt.Errorf("command timed out after %ds", timeoutSec)
 			return
@@ -136,7 +91,75 @@ func ExecuteCommand(ctx context.Context, wrappedCmd string, timeoutSec int) (std
 	return
 }
 
-// truncate limits a string to maxBytes, appending a truncation notice.
+// buildPowerShellCmd creates a PowerShell process that executes the command
+// via stdin piping. The process command line shows:
+//   powershell.exe -NoProfile -NonInteractive -Command -
+// and the actual command goes through stdin, but PowerShell still logs
+// the script block content in ScriptBlock Logging (Event ID 4104) which
+// detection rules can read.
+//
+// We also set preference variables to suppress noisy output streams
+// that interfere with clean stdout/stderr capture.
+func buildPowerShellCmd(ctx context.Context, command string) *exec.Cmd {
+	// Pipe the command via stdin to avoid all quoting issues.
+	// PowerShell's -Command - reads from stdin.
+	// ScriptBlock Logging (4104) still captures the full script text.
+	preamble := "$ProgressPreference='SilentlyContinue';" +
+		"$InformationPreference='SilentlyContinue';" +
+		"$WarningPreference='SilentlyContinue';" +
+		"$ErrorActionPreference='Continue';\n"
+
+	fullScript := preamble + command
+
+	cmd := exec.CommandContext(ctx,
+		"powershell.exe",
+		"-NoProfile",
+		"-NonInteractive",
+		"-ExecutionPolicy", "Bypass",
+		"-Command", "-",
+	)
+	cmd.Stdin = strings.NewReader(fullScript)
+	return cmd
+}
+
+// buildCmdPromptCmd writes the command to a temp .bat file and executes it
+// with cmd.exe /c. The process tree shows the actual batch commands.
+// The temp file is cleaned up after execution.
+func buildCmdPromptCmd(ctx context.Context, command string) (*exec.Cmd, error) {
+	// Write to temp .bat file — avoids quoting issues entirely.
+	// cmd.exe runs the file directly, so the commands are visible in
+	// process creation events and file system monitoring.
+	tmpDir := os.TempDir()
+	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("sentinel_%d.bat", time.Now().UnixNano()))
+
+	// Ensure CRLF line endings for Windows batch files
+	script := strings.ReplaceAll(command, "\n", "\r\n")
+	if err := os.WriteFile(tmpFile, []byte(script), 0644); err != nil {
+		return nil, err
+	}
+
+	// Build a wrapper that runs the .bat then cleans it up
+	cmd := exec.CommandContext(ctx, "cmd.exe", "/C", tmpFile, "&", "del", "/Q", tmpFile)
+	return cmd, nil
+}
+
+// buildBashCmd runs the command directly through bash -c.
+// Process creation events show: /bin/bash -c "<actual command>"
+func buildBashCmd(ctx context.Context, command string, elevationRequired bool) *exec.Cmd {
+	if elevationRequired {
+		return exec.CommandContext(ctx, "sudo", "/bin/bash", "-c", command)
+	}
+	return exec.CommandContext(ctx, "/bin/bash", "-c", command)
+}
+
+// buildShCmd runs the command directly through sh -c.
+func buildShCmd(ctx context.Context, command string, elevationRequired bool) *exec.Cmd {
+	if elevationRequired {
+		return exec.CommandContext(ctx, "sudo", "/bin/sh", "-c", command)
+	}
+	return exec.CommandContext(ctx, "/bin/sh", "-c", command)
+}
+
 func truncate(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s

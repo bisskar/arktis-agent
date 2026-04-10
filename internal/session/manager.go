@@ -89,17 +89,17 @@ func NewManager() *Manager {
 	return &Manager{}
 }
 
-// HandleExec wraps the command, executes it, and sends the result back.
+// HandleExec executes the command directly (no encoding) and sends the result back.
+// Commands are run in plain text so detection rules can see them in process events.
 // Intended to be called in a goroutine.
 func (m *Manager) HandleExec(msg *ExecMessage, sender Sender) {
 	log.Printf("Executing command (request_id=%s, executor=%s)", msg.RequestID, msg.ExecutorName)
 
-	wrapped := executor.WrapCommand(msg.Command, msg.ExecutorName, msg.ElevationRequired)
-
 	stdout, stderr, exitCode, duration, err := executor.ExecuteCommand(
-		// Use background context — the exec has its own timeout.
 		context.Background(),
-		wrapped,
+		msg.Command,
+		msg.ExecutorName,
+		msg.ElevationRequired,
 		msg.TimeoutSeconds,
 	)
 	if err != nil {
