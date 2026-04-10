@@ -132,32 +132,53 @@ func buildCmdPromptCmd(ctx context.Context, command string) (*exec.Cmd, error) {
 	tmpDir := os.TempDir()
 	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("sentinel_%d.bat", time.Now().UnixNano()))
 
-	// Ensure CRLF line endings for Windows batch files
+	// Ensure CRLF line endings for Windows batch files, append self-cleanup
 	script := strings.ReplaceAll(command, "\n", "\r\n")
+	script += "\r\ndel /Q \"" + tmpFile + "\" >nul 2>&1\r\n"
+
 	if err := os.WriteFile(tmpFile, []byte(script), 0644); err != nil {
 		return nil, err
 	}
 
-	// Build a wrapper that runs the .bat then cleans it up
-	cmd := exec.CommandContext(ctx, "cmd.exe", "/C", tmpFile, "&", "del", "/Q", tmpFile)
+	cmd := exec.CommandContext(ctx, "cmd.exe", "/C", tmpFile)
 	return cmd, nil
 }
 
-// buildBashCmd runs the command directly through bash -c.
-// Process creation events show: /bin/bash -c "<actual command>"
+// buildBashCmd writes the command to a temp .sh script and executes it.
+//
+// Why not bash -c? Complex ART commands contain quotes, $variables,
+// backticks, pipes, and multi-line heredocs that break shell argument
+// parsing. A temp file avoids all escaping issues.
+//
+// Detection visibility:
+//   - Process tree shows: /bin/bash /tmp/sentinel_xxx.sh
+//   - Each command inside the script spawns child processes with
+//     their full command lines visible to auditd/sysmon
+//   - File integrity monitoring can read the script content
+//   - The script is cleaned up after execution
 func buildBashCmd(ctx context.Context, command string, elevationRequired bool) *exec.Cmd {
-	if elevationRequired {
-		return exec.CommandContext(ctx, "sudo", "/bin/bash", "-c", command)
-	}
-	return exec.CommandContext(ctx, "/bin/bash", "-c", command)
+	return buildShellScript(ctx, command, "/bin/bash", elevationRequired)
 }
 
-// buildShCmd runs the command directly through sh -c.
+// buildShCmd writes the command to a temp .sh script and executes it via sh.
 func buildShCmd(ctx context.Context, command string, elevationRequired bool) *exec.Cmd {
+	return buildShellScript(ctx, command, "/bin/sh", elevationRequired)
+}
+
+// buildShellScript writes a command to a temp script and returns a Cmd to run it.
+// The script is self-deleting (trap on EXIT removes the temp file).
+func buildShellScript(ctx context.Context, command string, shell string, elevationRequired bool) *exec.Cmd {
+	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("sentinel_%d.sh", time.Now().UnixNano()))
+
+	// Prepend a self-cleanup trap and a shebang
+	script := fmt.Sprintf("#!%s\ntrap 'rm -f \"%s\"' EXIT\n%s\n", shell, tmpFile, command)
+	// Best-effort write — if it fails, exec will fail with a clear error
+	os.WriteFile(tmpFile, []byte(script), 0700)
+
 	if elevationRequired {
-		return exec.CommandContext(ctx, "sudo", "/bin/sh", "-c", command)
+		return exec.CommandContext(ctx, "sudo", shell, tmpFile)
 	}
-	return exec.CommandContext(ctx, "/bin/sh", "-c", command)
+	return exec.CommandContext(ctx, shell, tmpFile)
 }
 
 func truncate(s string, maxBytes int) string {
