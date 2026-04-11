@@ -16,13 +16,13 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            binary: sentinel-agent-linux-amd64
+            binary: arktis-agent-linux-amd64
           - goos: linux
             goarch: arm64
-            binary: sentinel-agent-linux-arm64
+            binary: arktis-agent-linux-arm64
           - goos: windows
             goarch: amd64
-            binary: sentinel-agent-windows-amd64.exe
+            binary: arktis-agent-windows-amd64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +38,7 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           go build -ldflags "-X main.Version=${VERSION} -s -w" \
-            -o ${{ matrix.binary }} ./cmd/sentinel-agent
+            -o ${{ matrix.binary }} ./cmd/arktis-agent
 
       - uses: actions/upload-artifact@v4
         with:
@@ -58,6 +58,6 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            sentinel-agent-linux-amd64
-            sentinel-agent-linux-arm64
-            sentinel-agent-windows-amd64.exe
+            arktis-agent-linux-amd64
+            arktis-agent-linux-arm64
+            arktis-agent-windows-amd64.exe

@@ -130,7 +130,7 @@ func buildCmdPromptCmd(ctx context.Context, command string) (*exec.Cmd, error) {
 	// cmd.exe runs the file directly, so the commands are visible in
 	// process creation events and file system monitoring.
 	tmpDir := os.TempDir()
-	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("sentinel_%d.bat", time.Now().UnixNano()))
+	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("arktis_%d.bat", time.Now().UnixNano()))
 
 	// Ensure CRLF line endings for Windows batch files, append self-cleanup
 	script := strings.ReplaceAll(command, "\n", "\r\n")
@@ -151,7 +151,7 @@ func buildCmdPromptCmd(ctx context.Context, command string) (*exec.Cmd, error) {
 // parsing. A temp file avoids all escaping issues.
 //
 // Detection visibility:
-//   - Process tree shows: /bin/bash /tmp/sentinel_xxx.sh
+//   - Process tree shows: /bin/bash /tmp/arktis_xxx.sh
 //   - Each command inside the script spawns child processes with
 //     their full command lines visible to auditd/sysmon
 //   - File integrity monitoring can read the script content
@@ -168,7 +168,7 @@ func buildShCmd(ctx context.Context, command string, elevationRequired bool) *ex
 // buildShellScript writes a command to a temp script and returns a Cmd to run it.
 // The script is self-deleting (trap on EXIT removes the temp file).
 func buildShellScript(ctx context.Context, command string, shell string, elevationRequired bool) *exec.Cmd {
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("sentinel_%d.sh", time.Now().UnixNano()))
+	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("arktis_%d.sh", time.Now().UnixNano()))
 
 	// Prepend a self-cleanup trap and a shebang
 	script := fmt.Sprintf("#!%s\ntrap 'rm -f \"%s\"' EXIT\n%s\n", shell, tmpFile, command)
