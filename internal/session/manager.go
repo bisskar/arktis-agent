@@ -6,7 +6,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/bisskar/sentinel-agent/internal/executor"
+	"github.com/bisskar/arktis-agent/internal/executor"
 )
 
 // Sender is the interface for sending messages back to the backend.

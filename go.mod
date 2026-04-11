@@ -1,4 +1,4 @@
-module github.com/bisskar/sentinel-agent
+module github.com/bisskar/arktis-agent
 
 go 1.22
 

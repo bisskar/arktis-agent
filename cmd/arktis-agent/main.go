@@ -10,9 +10,9 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/bisskar/sentinel-agent/internal/config"
-	"github.com/bisskar/sentinel-agent/internal/connection"
-	"github.com/bisskar/sentinel-agent/internal/session"
+	"github.com/bisskar/arktis-agent/internal/config"
+	"github.com/bisskar/arktis-agent/internal/connection"
+	"github.com/bisskar/arktis-agent/internal/session"
 )
 
 // Version is set via ldflags at build time.
@@ -24,9 +24,9 @@ func defaultStateDir() string {
 		if pd == "" {
 			pd = `C:\ProgramData`
 		}
-		return pd + `\sentinel-agent`
+		return pd + `\arktis-agent`
 	}
-	return "/etc/sentinel-agent"
+	return "/etc/arktis-agent"
 }
 
 func main() {
@@ -37,7 +37,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("sentinel-agent %s\n", Version)
+		fmt.Printf("arktis-agent %s\n", Version)
 		os.Exit(0)
 	}
 
@@ -65,7 +65,7 @@ func main() {
 		state = &config.State{}
 	}
 
-	log.Printf("sentinel-agent %s starting (state-dir=%s)", Version, cfg.StateDir)
+	log.Printf("arktis-agent %s starting (state-dir=%s)", Version, cfg.StateDir)
 
 	// Inject version into the connection package for registration messages.
 	connection.SetVersion(Version)
@@ -92,5 +92,5 @@ func main() {
 		log.Fatalf("Agent exited with error: %v", err)
 	}
 
-	log.Println("sentinel-agent stopped")
+	log.Println("arktis-agent stopped")
 }

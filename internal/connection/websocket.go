@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bisskar/sentinel-agent/internal/config"
-	"github.com/bisskar/sentinel-agent/internal/executor"
-	"github.com/bisskar/sentinel-agent/internal/session"
+	"github.com/bisskar/arktis-agent/internal/config"
+	"github.com/bisskar/arktis-agent/internal/executor"
+	"github.com/bisskar/arktis-agent/internal/session"
 	"github.com/gorilla/websocket"
 )
 
