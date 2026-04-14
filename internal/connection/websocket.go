@@ -171,6 +171,19 @@ func (c *Client) connect(ctx context.Context) error {
 	defer hbCancel()
 	go c.heartbeatLoop(hbCtx)
 
+	// Close the websocket when the context is cancelled. This unblocks
+	// conn.ReadMessage() in the read loop so graceful shutdown doesn't
+	// have to wait up to ~15s for the next heartbeat frame.
+	closeOnCancelDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			c.closeConn()
+		case <-closeOnCancelDone:
+		}
+	}()
+	defer close(closeOnCancelDone)
+
 	// Read loop blocks until error or context cancellation.
 	c.readLoop(ctx)
 

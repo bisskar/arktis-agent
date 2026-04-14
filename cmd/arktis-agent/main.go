@@ -86,6 +86,11 @@ func main() {
 		log.Printf("Received signal %s, shutting down gracefully...", sig)
 		mgr.CloseAll()
 		cancel()
+
+		// Stop intercepting signals so a second Ctrl+C triggers Go's default
+		// SIGINT handler and force-exits. Prevents the process from hanging
+		// if graceful shutdown gets stuck.
+		signal.Stop(sigCh)
 	}()
 
 	if err := client.Run(ctx); err != nil {
