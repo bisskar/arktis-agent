@@ -3,44 +3,120 @@
 package executor
 
 import (
+	"encoding/base64"
 	"fmt"
+	"log"
 	"os"
-	"os/exec"
 	"sync"
+
+	"github.com/UserExistsError/conpty"
 )
 
-// PtySession is a placeholder on Windows.
-// Full ConPTY support can be added in a future version.
+// PtySession wraps an interactive ConPTY shell session on Windows.
 type PtySession struct {
 	sessionID string
-	cmd       *exec.Cmd
-	pty       *os.File
+	cpty      *conpty.ConPty
 	done      chan struct{}
 	once      sync.Once
 }
 
-// NewPtySession returns an error on Windows — interactive PTY is not yet
-// supported. Use command execution instead.
+// NewPtySession creates and starts a new PTY session using ConPTY.
+//
+// On Windows 10 1809+ / Server 2019+, ConPTY is the modern pseudo-console
+// API. Earlier Windows versions are not supported.
+//
+// Shell resolution order:
+//  1. %COMSPEC% env var (typically cmd.exe)
+//  2. powershell.exe (via PATH)
+//  3. cmd.exe fallback
 func NewPtySession(sessionID string, termType string, cols int, rows int) (*PtySession, error) {
-	return nil, fmt.Errorf("interactive PTY is not yet supported on Windows — use command execution instead")
+	shell := resolveWindowsShell()
+
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+
+	cpty, err := conpty.Start(shell,
+		conpty.ConPtyDimensions(cols, rows),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("start conpty with %q: %w", shell, err)
+	}
+
+	return &PtySession{
+		sessionID: sessionID,
+		cpty:      cpty,
+		done:      make(chan struct{}),
+	}, nil
 }
 
-// Write is a no-op stub for Windows.
+// resolveWindowsShell picks the best available shell on the host.
+func resolveWindowsShell() string {
+	if comspec := os.Getenv("COMSPEC"); comspec != "" {
+		if _, err := os.Stat(comspec); err == nil {
+			return comspec
+		}
+	}
+	// Prefer powershell for a more useful interactive experience.
+	candidates := []string{
+		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		`C:\Windows\System32\cmd.exe`,
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return "cmd.exe"
+}
+
+// Write sends input data to the ConPTY.
 func (p *PtySession) Write(data []byte) (int, error) {
-	return 0, fmt.Errorf("PTY not supported on Windows")
+	return p.cpty.Write(data)
 }
 
-// Resize is a no-op stub for Windows.
+// Resize changes the ConPTY window size.
 func (p *PtySession) Resize(cols int, rows int) error {
-	return fmt.Errorf("PTY not supported on Windows")
+	if cols <= 0 || rows <= 0 {
+		return nil
+	}
+	return p.cpty.Resize(cols, rows)
 }
 
-// Close is a no-op stub for Windows.
+// Close terminates the ConPTY session.
 func (p *PtySession) Close() error {
-	return nil
+	var err error
+	p.once.Do(func() {
+		close(p.done)
+		if p.cpty != nil {
+			err = p.cpty.Close()
+		}
+	})
+	return err
 }
 
-// ReadLoop is a no-op stub for Windows.
+// ReadLoop reads ConPTY output in a loop, calling send with base64-encoded
+// chunks. It blocks until the PTY is closed or an error occurs.
 func (p *PtySession) ReadLoop(send func(data []byte)) {
-	// No-op on Windows.
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-p.done:
+			return
+		default:
+		}
+
+		n, err := p.cpty.Read(buf)
+		if n > 0 {
+			encoded := base64.StdEncoding.EncodeToString(buf[:n])
+			send([]byte(encoded))
+		}
+		if err != nil {
+			log.Printf("ConPTY read ended for session %s: %v", p.sessionID, err)
+			return
+		}
+	}
 }
