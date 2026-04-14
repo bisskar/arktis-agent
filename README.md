@@ -149,6 +149,49 @@ go run ./cmd/arktis-agent --url ws://localhost:8000/api/v1/agent/ws --key <KEY>
 make test
 ```
 
+## Release Process
+
+There are two workflows in `.github/workflows/`:
+
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| `ci.yml` | Every PR and every push to `main` | Lint, vet, test — **no binaries built, no release created** |
+| `release.yml` | Only when a `v*` git tag is pushed | Builds binaries for all platforms and publishes a GitHub Release |
+
+**Important:** merging a PR to `main` does NOT create a release. A PR merge only runs CI. You must push a version tag separately to publish binaries.
+
+### Cutting a new release
+
+```bash
+# 1. Make sure main is green and you're on the commit you want to release
+git checkout main && git pull
+
+# 2. Tag it (use semver: MAJOR.MINOR.PATCH)
+git tag v0.2.0
+
+# 3. Push the tag — this triggers release.yml
+git push origin v0.2.0
+```
+
+Within ~2 minutes the release appears at `https://github.com/bisskar/arktis-agent/releases/latest` with three assets attached:
+
+- `arktis-agent-linux-amd64`
+- `arktis-agent-linux-arm64`
+- `arktis-agent-windows-amd64.exe`
+
+The install commands in the Quick Start section above always pull `/releases/latest/download/...` so they automatically use the newest tagged version.
+
+### If a release fails
+
+Fix the issue on `main` (a new commit), then move the tag:
+
+```bash
+git tag -d v0.2.0                      # delete local
+git push origin --delete v0.2.0        # delete remote
+git tag v0.2.0 <new-commit-sha>        # retag on fixed commit
+git push origin v0.2.0                 # re-trigger release.yml
+```
+
 ## License
 
 Private. Part of the Arktis platform.
