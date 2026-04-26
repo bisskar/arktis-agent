@@ -250,9 +250,12 @@ backend.
 | `--max-pty-sessions` | `ARKTIS_MAX_PTY` | `4` | Max simultaneous PTY sessions. |
 | `--audit-log` | `ARKTIS_AUDIT_LOG` | `` | Path to a JSON-line audit log of every exec/pty event. Empty disables auditing. |
 | `--audit-log-include-command` | `ARKTIS_AUDIT_LOG_INCLUDE_COMMAND` | `false` | Include the full command body in audit records (default logs only a SHA-256 + byte count). |
+| `--audit-log-chain-key` | `ARKTIS_AUDIT_LOG_CHAIN_KEY` | `` | Path to a 32-byte HMAC key. When set, every audit record carries an HMAC chained off the previous one — a tamper-evident log. The key is generated on first run if missing. |
 | `--ca-cert` | `ARKTIS_CA_CERT` | (system) | Path to a PEM file used as the **only** trusted root for the backend's TLS cert. Defence-in-depth against system-CA compromise. |
 | `--pin-spki` | `ARKTIS_PIN_SPKI` | `` | Hex-encoded SHA-256 of the backend's SubjectPublicKeyInfo. The dial fails if the leaf cert's SPKI hash does not match. |
 | `--strict-endpoint` | `ARKTIS_STRICT_ENDPOINT` | `false` | After a successful first connect, refuse to reconnect if the backend's resolved IP changes (DNS-rebinding mitigation). |
+| `--signing-pubkey-file` | `ARKTIS_SIGNING_PUBKEY_FILE` | `` | Path to a PEM-encoded Ed25519 public key. When set, every `exec`/`pty_open` is verified against `signature` + `signed_at` (±5 min skew). |
+| `--require-message-signature` | `ARKTIS_REQUIRE_MESSAGE_SIGNATURE` | `false` | Reject unsigned `exec`/`pty_open` messages. Requires `--signing-pubkey-file`. |
 | `--version` | — | — | Print version and exit |
 
 ## Security Model
