@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 
 	"github.com/bisskar/arktis-agent/internal/config"
@@ -36,6 +37,12 @@ func main() {
 	url := flag.String("url", "", "Backend WebSocket URL (required)")
 	key := flag.String("key", "", "Registration key (required)")
 	stateDir := flag.String("state-dir", defaultStateDir(), "Directory for persistent state")
+	allowElevation := flag.Bool("allow-elevation", envBool("ARKTIS_ALLOW_ELEVATION", false),
+		"Honour exec messages with elevation_required=true (otherwise: refuse with exit_code=126)")
+	maxExec := flag.Int("max-exec-concurrency", envInt("ARKTIS_MAX_EXEC", 8),
+		"Maximum simultaneous in-flight exec commands; further requests are rejected with exit_code=503")
+	maxPty := flag.Int("max-pty-sessions", envInt("ARKTIS_MAX_PTY", 4),
+		"Maximum simultaneous PTY sessions; further opens are rejected with reason=\"agent at pty capacity\"")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -92,8 +99,17 @@ func main() {
 	// Inject version into the connection package for registration messages.
 	connection.SetVersion(Version)
 
+	if *allowElevation {
+		log.Printf("Elevation enabled: backend-issued elevation_required=true commands will run via sudo")
+	}
+
 	// Create session manager and WebSocket client.
-	mgr := session.NewManager(scriptsDir)
+	mgr := session.NewManager(session.Config{
+		ScriptsDir:     scriptsDir,
+		MaxExec:        *maxExec,
+		MaxPty:         *maxPty,
+		AllowElevation: *allowElevation,
+	})
 	client := connection.NewClient(cfg, state, mgr)
 
 	// Context with OS signal cancellation.
@@ -120,4 +136,30 @@ func main() {
 	}
 
 	log.Println("arktis-agent stopped")
+}
+
+func envBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("Warning: ignoring %s=%q: %v", key, v, err)
+		return fallback
+	}
+	return b
+}
+
+func envInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Printf("Warning: ignoring %s=%q: must be a positive integer", key, v)
+		return fallback
+	}
+	return n
 }
