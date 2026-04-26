@@ -299,10 +299,20 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 	log.Printf("PTY session_id=%q closed", msg.SessionID)
 }
 
+// maxPtyInputBase64 caps the base64-encoded PTY input we'll decode in
+// one frame. The wire-level cap (maxFrameBytes in connection) already
+// bounds the entire JSON frame, but keeping a tighter pty_input ceiling
+// here protects the session-level decode buffer specifically.
+const maxPtyInputBase64 = 1 * 1024 * 1024 // 1 MiB encoded ~= 768 KiB raw
+
 // HandlePtyInput decodes base64 input and writes it to the PTY.
 func (m *Manager) HandlePtyInput(msg *protocol.PtyInputMessage) {
 	if !validID(msg.SessionID) {
 		log.Printf("Rejecting pty_input with invalid session_id %q", msg.SessionID)
+		return
+	}
+	if len(msg.Data) > maxPtyInputBase64 {
+		log.Printf("Rejecting oversize pty_input for session_id=%q (%d bytes)", msg.SessionID, len(msg.Data))
 		return
 	}
 

@@ -25,6 +25,11 @@ Every release ships with a `sha256sums.txt` checksum manifest and a
 keyless [cosign](https://docs.sigstore.dev/cosign/overview/) signature
 bundle. Verify before running.
 
+> **Important:** the registration key authenticates the agent to the
+> backend. Treat it like a password. The recommended install path puts
+> it in a permission-locked file (`--key-file`) rather than on argv,
+> where it would be visible to `ps`, `/proc/<pid>/cmdline`, and auditd.
+
 **Linux:**
 
 ```bash
@@ -47,7 +52,14 @@ cosign verify-blob \
 sha256sum -c --ignore-missing sha256sums.txt
 sudo install -m 0755 arktis-agent /usr/local/bin/arktis-agent
 
-arktis-agent --url wss://your-server.com/api/v1/agent/ws --key <YOUR_KEY>
+# 4. Stash the key in a 0600 file (do NOT pass it on argv).
+sudo install -d -m 0700 /etc/arktis-agent
+echo '<YOUR_KEY>' | sudo tee /etc/arktis-agent/key >/dev/null
+sudo chmod 0600 /etc/arktis-agent/key
+
+arktis-agent \
+  --url wss://your-server.com/api/v1/agent/ws \
+  --key-file /etc/arktis-agent/key
 ```
 
 **Windows (PowerShell):**
@@ -71,7 +83,18 @@ $actual   = (Get-FileHash arktis-agent.exe -Algorithm SHA256).Hash.ToLower()
 if ($expected -ne $actual) { throw "checksum mismatch" }
 
 Move-Item -Force arktis-agent.exe "$env:ProgramFiles\arktis-agent.exe"
-& "$env:ProgramFiles\arktis-agent.exe" --url wss://your-server.com/api/v1/agent/ws --key <YOUR_KEY>
+
+# Stash the key in a file ACL'd to the service account, then point the
+# agent at it. ARKTIS_KEY env var (loaded from a managed secret store)
+# is also fine — anything but the command line.
+$keyFile = "$env:ProgramData\arktis-agent\key"
+New-Item -Path "$env:ProgramData\arktis-agent" -ItemType Directory -Force | Out-Null
+"<YOUR_KEY>" | Out-File -Encoding ASCII -NoNewline -FilePath $keyFile
+icacls $keyFile /inheritance:r /grant:r "$env:USERNAME:(R)"
+
+& "$env:ProgramFiles\arktis-agent.exe" `
+  --url wss://your-server.com/api/v1/agent/ws `
+  --key-file $keyFile
 ```
 
 The agent self-registers on first connect. It will appear in your Lab Hosts list within seconds.
@@ -93,6 +116,14 @@ sudo install -d -o arktis -g arktis -m 0700 /var/lib/arktis-agent
 # 2. Install the verified binary as root, run as `arktis`.
 sudo install -o root -g root -m 0755 arktis-agent /usr/local/bin/arktis-agent
 
+# 3. Store the registration key in an EnvironmentFile readable only by
+#    the arktis user. systemd loads ARKTIS_KEY into the service env;
+#    it never appears on argv.
+sudo install -d -o arktis -g arktis -m 0700 /etc/arktis-agent
+echo "ARKTIS_KEY=<YOUR_KEY>" | sudo tee /etc/arktis-agent/env >/dev/null
+sudo chown arktis:arktis /etc/arktis-agent/env
+sudo chmod 0600 /etc/arktis-agent/env
+
 sudo tee /etc/systemd/system/arktis-agent.service > /dev/null <<'EOF'
 [Unit]
 Description=Arktis Agent
@@ -102,9 +133,9 @@ Wants=network-online.target
 [Service]
 User=arktis
 Group=arktis
+EnvironmentFile=/etc/arktis-agent/env
 ExecStart=/usr/local/bin/arktis-agent \
   --url wss://your-server.com/api/v1/agent/ws \
-  --key <YOUR_KEY> \
   --state-dir /var/lib/arktis-agent \
   --require-non-root \
   --audit-log /var/lib/arktis-agent/audit.log
@@ -155,8 +186,15 @@ SYSTEM. Grant the account write access to `%ProgramData%\arktis-agent`.
 # Replace with your account; use a gMSA in domain environments.
 $cred  = Get-Credential -UserName ".\arktis-svc" -Message "Service account password"
 
+# Stash the key in a permission-locked file under ProgramData. Argv
+# would otherwise expose it via Get-CimInstance Win32_Process / SACL.
+$keyFile = "$env:ProgramData\arktis-agent\key"
+New-Item -Path "$env:ProgramData\arktis-agent" -ItemType Directory -Force | Out-Null
+"<YOUR_KEY>" | Out-File -Encoding ASCII -NoNewline -FilePath $keyFile
+icacls $keyFile /inheritance:r /grant:r ($cred.UserName + ":(R)")
+
 $action   = New-ScheduledTaskAction -Execute "$env:ProgramFiles\arktis-agent.exe" `
-  -Argument "--url wss://your-server.com/api/v1/agent/ws --key <YOUR_KEY> --require-non-root"
+  -Argument "--url wss://your-server.com/api/v1/agent/ws --key-file `"$keyFile`" --require-non-root"
 $trigger  = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Seconds 30)
 
@@ -201,9 +239,11 @@ backend.
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `--url` | `ARKTIS_URL` | (required) | Backend WebSocket URL |
-| `--key` | `ARKTIS_KEY` | (required) | Registration key from Arktis |
-| `--state-dir` | `ARKTIS_STATE_DIR` | `/etc/arktis-agent` (Linux) or `%ProgramData%\arktis-agent` (Windows) | Directory for persistent state |
+| `--url` | `ARKTIS_URL` | (required) | Backend WebSocket URL. Must be `wss://` unless `--insecure` is set. |
+| `--key-file` | `ARKTIS_KEY_FILE` | `` | Path to a 0600-mode file containing the registration key. **Preferred over `--key`.** |
+| `--key` | `ARKTIS_KEY` | `` | Registration key. Reading via env var is fine; passing on argv (`--key`) is **deprecated** because the value leaks to `ps`/auditd. |
+| `--insecure` | `ARKTIS_INSECURE` | `false` | Allow plaintext `ws://` URLs. Logs a loud warning on every connect. Local development only. |
+| `--state-dir` | `ARKTIS_STATE_DIR` | `/etc/arktis-agent` (Linux) or `%ProgramData%\arktis-agent` (Windows) | Directory for persistent state. |
 | `--require-non-root` | `ARKTIS_REQUIRE_NON_ROOT` | `false` | Refuse to start if running as root (Linux euid=0). Recommended for production. |
 | `--allow-elevation` | `ARKTIS_ALLOW_ELEVATION` | `false` | Honour `elevation_required=true` exec messages (otherwise: refuse with `exit_code=126`). |
 | `--max-exec-concurrency` | `ARKTIS_MAX_EXEC` | `8` | Max simultaneous in-flight exec commands. |
@@ -303,10 +343,15 @@ ls dist/
 ## Development
 
 ```bash
-# Run locally
-go run ./cmd/arktis-agent --url ws://localhost:8000/api/v1/agent/ws --key <KEY>
+# Run locally. --insecure is required for ws:// URLs; production must
+# use wss://. The key still travels in argv here, which is fine for
+# a developer terminal but never for a service install.
+go run ./cmd/arktis-agent \
+  --url ws://localhost:8000/api/v1/agent/ws \
+  --insecure \
+  --key <KEY>
 
-# Run tests
+# Run tests (race detector enabled)
 make test
 ```
 

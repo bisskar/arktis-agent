@@ -35,6 +35,18 @@ const (
 	// A misbehaving / chatty PTY then visibly drops frames instead of
 	// silently starving every other session sharing the connection.
 	sendBufSize = 64
+
+	// maxFrameBytes is the per-frame cap we apply to inbound WebSocket
+	// messages (#4). A multi-GB frame can no longer OOM the agent; the
+	// connection is closed and the reconnect loop takes over.
+	maxFrameBytes = 4 * 1024 * 1024 // 4 MiB
+
+	// readTimeout is the application-level read deadline we keep
+	// refreshed via pongs and successful frames. A blackholed network
+	// (NAT idle, route flap) trips this and forces a reconnect rather
+	// than letting the read loop block indefinitely on a half-open
+	// TCP connection.
+	readTimeout = 2 * heartbeatInterval
 )
 
 // ErrSendBufferFull is returned by Send when the writer goroutine cannot
@@ -267,6 +279,18 @@ func (c *Client) connect(ctx context.Context) error {
 		log.Printf("Re-connected with host_id=%s", c.state.HostID)
 	}
 
+	// Cap inbound frame size and install pong-driven read deadlines (#4).
+	// SetReadLimit must come before the post-ack message stream; otherwise
+	// a multi-GB frame can OOM-kill the agent before we react.
+	conn.SetReadLimit(maxFrameBytes)
+	if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+		c.closeConn()
+		return fmt.Errorf("set initial read deadline: %w", err)
+	}
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readTimeout))
+	})
+
 	// Install the per-connection send queue and start the writer goroutine.
 	// All post-handshake Send() calls go through this queue so a chatty PTY
 	// can no longer hold a single mutex and starve heartbeats / other sessions.
@@ -307,7 +331,7 @@ func (c *Client) connect(ctx context.Context) error {
 	defer hbCancel()
 	hbDone := make(chan struct{})
 	defer close(hbDone)
-	go c.heartbeatLoop(hbCtx, hbDone, sender)
+	go c.heartbeatLoop(hbCtx, hbDone, conn, sender)
 
 	// Close the websocket when the context is cancelled. This unblocks
 	// conn.ReadMessage() in the read loop so graceful shutdown doesn't
@@ -377,6 +401,11 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, sender conn
 			}
 			return
 		}
+		// Refresh the application read deadline on every successful frame.
+		// pongs already do this via SetPongHandler, but a steady stream of
+		// real messages should also count as liveness without waiting for
+		// the next heartbeat tick.
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 
 		var base protocol.BaseMessage
 		if err := json.Unmarshal(raw, &base); err != nil {
@@ -435,10 +464,15 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, sender conn
 	}
 }
 
-// heartbeatLoop sends heartbeat messages at regular intervals through
-// the per-connection sender. done is closed by the connect() call frame
-// to terminate the loop on disconnect; ctx covers root-shutdown.
-func (c *Client) heartbeatLoop(ctx context.Context, done <-chan struct{}, sender connSender) {
+// heartbeatLoop sends a WebSocket-level ping every heartbeatInterval and
+// also enqueues an application-level "heartbeat" message for backends
+// that count it. The ping path bypasses the writer-goroutine queue
+// (gorilla's WriteControl is concurrent-safe) so a chatty PTY that has
+// filled the queue cannot stop the ping from going out — and the
+// resulting pong refreshes the read deadline so half-open connections
+// are detected within readTimeout. done is closed by the connect() call
+// frame to terminate the loop on disconnect; ctx covers root-shutdown.
+func (c *Client) heartbeatLoop(ctx context.Context, done <-chan struct{}, conn *websocket.Conn, sender connSender) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -449,12 +483,15 @@ func (c *Client) heartbeatLoop(ctx context.Context, done <-chan struct{}, sender
 		case <-done:
 			return
 		case <-ticker.C:
+			// WS-level ping: liveness check + drives the pong handler.
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
+				log.Printf("Failed to send ping: %v", err)
+				return
+			}
+			// App-level heartbeat: enqueued, may be dropped under load.
 			if err := sender.Send(protocol.HeartbeatMessage{Type: "heartbeat"}); err != nil {
-				log.Printf("Failed to enqueue heartbeat: %v", err)
-				// Don't return on a backpressure-only failure — we'll
-				// try again next tick. A genuine teardown is signalled
-				// through ctx / done.
 				if !errors.Is(err, ErrSendBufferFull) {
+					log.Printf("Failed to enqueue heartbeat: %v", err)
 					return
 				}
 			}
