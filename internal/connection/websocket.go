@@ -3,6 +3,7 @@ package connection
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/bisskar/arktis-agent/internal/config"
 	"github.com/bisskar/arktis-agent/internal/executor"
+	"github.com/bisskar/arktis-agent/internal/protocol"
 	"github.com/bisskar/arktis-agent/internal/session"
 	"github.com/gorilla/websocket"
 )
@@ -20,15 +22,32 @@ const (
 	heartbeatInterval = 15 * time.Second
 	maxBackoff        = 60 * time.Second
 	writeWait         = 10 * time.Second
+
+	// sendBufSize bounds how many messages can be queued for the
+	// writer goroutine before Send starts returning ErrSendBufferFull.
+	// A misbehaving / chatty PTY then visibly drops frames instead of
+	// silently starving every other session sharing the connection.
+	sendBufSize = 64
 )
+
+// ErrSendBufferFull is returned by Send when the writer goroutine cannot
+// keep up with producers. Callers (PTY readloop, exec result) should log
+// the back-pressure and continue rather than retry in a tight loop.
+var ErrSendBufferFull = errors.New("send buffer full")
+
+// errNotConnected indicates Send was called before the WebSocket and its
+// writer goroutine were ready, or after they wound down.
+var errNotConnected = errors.New("not connected")
 
 // Client manages the WebSocket connection to the backend.
 type Client struct {
 	config  *config.Config
 	state   *config.State
-	conn    *websocket.Conn
 	manager *session.Manager
-	mu      sync.Mutex
+
+	mu   sync.Mutex
+	conn *websocket.Conn  // active connection or nil
+	out  chan interface{} // active send queue or nil; drained by writer goroutine
 }
 
 // NewClient creates a new WebSocket client.
@@ -105,9 +124,12 @@ func (c *Client) connect(ctx context.Context) error {
 
 	log.Println("WebSocket connected, sending registration...")
 
-	// Send register message.
+	// Pre-handshake (register + ack) is done synchronously on the
+	// connection: the writer goroutine isn't running yet, so we don't
+	// need to coordinate with it. After the ack we install the queue
+	// and switch all Send calls to non-blocking enqueue.
 	hostname, _ := os.Hostname()
-	reg := RegisterMessage{
+	reg := protocol.RegisterMessage{
 		Type:         "register",
 		HostID:       c.state.HostID,
 		Hostname:     hostname,
@@ -116,21 +138,26 @@ func (c *Client) connect(ctx context.Context) error {
 		OsVersion:    executor.DetectOsVersion(),
 		AgentVersion: getVersion(),
 	}
-	if err := c.Send(reg); err != nil {
+	if err := writeJSON(conn, reg); err != nil {
 		c.closeConn()
 		return fmt.Errorf("send register: %w", err)
 	}
 
 	// Wait for ack.
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		c.closeConn()
+		return fmt.Errorf("set ack read deadline: %w", err)
+	}
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		c.closeConn()
 		return fmt.Errorf("read ack: %w", err)
 	}
-	conn.SetReadDeadline(time.Time{}) // Clear deadline.
+	// Clear deadline; failure here is benign — we'd just time out earlier
+	// on the next read — and the connection is healthy at this point.
+	_ = conn.SetReadDeadline(time.Time{})
 
-	var base BaseMessage
+	var base protocol.BaseMessage
 	if err := json.Unmarshal(raw, &base); err != nil {
 		c.closeConn()
 		return fmt.Errorf("parse ack: %w", err)
@@ -141,7 +168,7 @@ func (c *Client) connect(ctx context.Context) error {
 		return fmt.Errorf("expected ack, got %q", base.Type)
 	}
 
-	var ack AckMessage
+	var ack protocol.AckMessage
 	if err := json.Unmarshal(raw, &ack); err != nil {
 		c.closeConn()
 		return fmt.Errorf("parse ack payload: %w", err)
@@ -178,8 +205,28 @@ func (c *Client) connect(ctx context.Context) error {
 		log.Printf("Re-connected with host_id=%s", c.state.HostID)
 	}
 
-	// Connection established — reset backoff is handled by the caller observing success.
-	// We signal success by running the read loop (which blocks until disconnect).
+	// Install the per-connection send queue and start the writer goroutine.
+	// All post-handshake Send() calls go through this queue so a chatty PTY
+	// can no longer hold a single mutex and starve heartbeats / other sessions.
+	out := make(chan interface{}, sendBufSize)
+	c.mu.Lock()
+	c.out = out
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.out == out {
+			c.out = nil
+		}
+		c.mu.Unlock()
+		close(out)
+	}()
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		c.writeLoop(ctx, conn, out)
+	}()
+	defer func() { <-writerDone }()
 
 	// Start heartbeat goroutine. Both the per-connection done channel and
 	// the cancel func are scoped to this call frame: deferred close/cancel
@@ -206,13 +253,37 @@ func (c *Client) connect(ctx context.Context) error {
 	defer close(closeOnCancelDone)
 
 	// Read loop blocks until error or context cancellation.
-	c.readLoop(ctx)
+	c.readLoop(ctx, conn)
 
 	return nil
 }
 
+// writeLoop drains the send queue, serializing all post-handshake writes
+// to the WebSocket. Exits when the queue is closed (connect() returning)
+// or when WriteJSON fails (which also tears down the connection).
+func (c *Client) writeLoop(ctx context.Context, conn *websocket.Conn, out <-chan interface{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-out:
+			if !ok {
+				return
+			}
+			if err := writeJSON(conn, msg); err != nil {
+				log.Printf("WebSocket write error: %v", err)
+				// Tear the connection down so readLoop returns and we
+				// trigger a reconnect rather than silently losing more
+				// messages.
+				c.closeConn()
+				return
+			}
+		}
+	}
+}
+
 // readLoop reads and dispatches messages from the backend.
-func (c *Client) readLoop(ctx context.Context) {
+func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) {
 	defer c.closeConn()
 
 	for {
@@ -222,7 +293,7 @@ func (c *Client) readLoop(ctx context.Context) {
 		default:
 		}
 
-		_, raw, err := c.conn.ReadMessage()
+		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 				log.Printf("WebSocket read error: %v", err)
@@ -232,7 +303,7 @@ func (c *Client) readLoop(ctx context.Context) {
 			return
 		}
 
-		var base BaseMessage
+		var base protocol.BaseMessage
 		if err := json.Unmarshal(raw, &base); err != nil {
 			log.Printf("Failed to parse message type: %v", err)
 			continue
@@ -240,7 +311,7 @@ func (c *Client) readLoop(ctx context.Context) {
 
 		switch base.Type {
 		case "exec":
-			var msg session.ExecMessage
+			var msg protocol.ExecMessage
 			if err := json.Unmarshal(raw, &msg); err != nil {
 				log.Printf("Failed to parse exec message: %v", err)
 				continue
@@ -248,7 +319,7 @@ func (c *Client) readLoop(ctx context.Context) {
 			go c.manager.HandleExec(ctx, &msg, c)
 
 		case "pty_open":
-			var msg session.PtyOpenMessage
+			var msg protocol.PtyOpenMessage
 			if err := json.Unmarshal(raw, &msg); err != nil {
 				log.Printf("Failed to parse pty_open message: %v", err)
 				continue
@@ -256,7 +327,7 @@ func (c *Client) readLoop(ctx context.Context) {
 			go c.manager.HandlePtyOpen(&msg, c)
 
 		case "pty_input":
-			var msg session.PtyInputMessage
+			var msg protocol.PtyInputMessage
 			if err := json.Unmarshal(raw, &msg); err != nil {
 				log.Printf("Failed to parse pty_input message: %v", err)
 				continue
@@ -264,7 +335,7 @@ func (c *Client) readLoop(ctx context.Context) {
 			c.manager.HandlePtyInput(&msg)
 
 		case "pty_resize":
-			var msg session.PtyResizeMessage
+			var msg protocol.PtyResizeMessage
 			if err := json.Unmarshal(raw, &msg); err != nil {
 				log.Printf("Failed to parse pty_resize message: %v", err)
 				continue
@@ -272,7 +343,7 @@ func (c *Client) readLoop(ctx context.Context) {
 			c.manager.HandlePtyResize(&msg)
 
 		case "pty_close":
-			var msg session.PtyCloseMessage
+			var msg protocol.PtyCloseMessage
 			if err := json.Unmarshal(raw, &msg); err != nil {
 				log.Printf("Failed to parse pty_close message: %v", err)
 				continue
@@ -303,39 +374,63 @@ func (c *Client) heartbeatLoop(ctx context.Context, done <-chan struct{}) {
 		case <-done:
 			return
 		case <-ticker.C:
-			if err := c.Send(HeartbeatMessage{Type: "heartbeat"}); err != nil {
-				log.Printf("Failed to send heartbeat: %v", err)
-				return
+			if err := c.Send(protocol.HeartbeatMessage{Type: "heartbeat"}); err != nil {
+				log.Printf("Failed to enqueue heartbeat: %v", err)
+				// Don't return on a backpressure-only failure — we'll
+				// try again next tick. A genuine teardown is signalled
+				// through ctx / done.
+				if !errors.Is(err, ErrSendBufferFull) {
+					return
+				}
 			}
 		}
 	}
 }
 
-// Send marshals msg to JSON and writes it to the WebSocket. Thread-safe.
+// Send enqueues msg onto the writer goroutine's queue. It is non-blocking:
+// if the queue is full it returns ErrSendBufferFull immediately so a
+// misbehaving sender (e.g. a chatty PTY) can never starve other senders
+// or hold a write mutex across slow network frames.
 func (c *Client) Send(msg interface{}) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.conn == nil {
-		return fmt.Errorf("not connected")
+	out := c.out
+	c.mu.Unlock()
+	if out == nil {
+		return errNotConnected
 	}
-
-	c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	return c.conn.WriteJSON(msg)
+	select {
+	case out <- msg:
+		return nil
+	default:
+		return ErrSendBufferFull
+	}
 }
 
 // closeConn safely closes the WebSocket connection. The per-connection
-// heartbeat goroutine is wound down by connect()'s deferred close(hbDone)
-// rather than by this function — closeConn may be called multiple times
+// heartbeat / writer goroutines are wound down by connect()'s deferred
+// close(hbDone) and queue close — closeConn may be called multiple times
 // (read-loop exit, ctx-cancel goroutine) and must remain idempotent.
 func (c *Client) closeConn() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.conn != nil {
-		c.conn.Close()
+		// Close errors here are unactionable: the connection is being torn
+		// down, and any error means it was already broken from the other
+		// side. The reconnect loop handles the recovery path.
+		_ = c.conn.Close()
 		c.conn = nil
 	}
+}
+
+// writeJSON is the single point where we set the write deadline + marshal.
+// Used both by the synchronous register path and by the post-handshake
+// writer goroutine.
+func writeJSON(conn *websocket.Conn, msg interface{}) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
+	return conn.WriteJSON(msg)
 }
 
 // getVersion returns the agent version (set via ldflags in main).
