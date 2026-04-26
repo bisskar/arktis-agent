@@ -92,11 +92,15 @@ func NewManager() *Manager {
 // HandleExec executes the command directly (no encoding) and sends the result back.
 // Commands are run in plain text so detection rules can see them in process events.
 // Intended to be called in a goroutine.
-func (m *Manager) HandleExec(msg *ExecMessage, sender Sender) {
+//
+// ctx is the agent's root context — cancelling it (e.g. on SIGTERM) will
+// kill the child process so we don't block shutdown waiting for a long
+// command to finish.
+func (m *Manager) HandleExec(ctx context.Context, msg *ExecMessage, sender Sender) {
 	log.Printf("Executing command (request_id=%s, executor=%s)", msg.RequestID, msg.ExecutorName)
 
 	stdout, stderr, exitCode, duration, err := executor.ExecuteCommand(
-		context.Background(),
+		ctx,
 		msg.Command,
 		msg.ExecutorName,
 		msg.ElevationRequired,
