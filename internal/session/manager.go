@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/bisskar/arktis-agent/internal/audit"
 	"github.com/bisskar/arktis-agent/internal/executor"
 	"github.com/bisskar/arktis-agent/internal/protocol"
 )
@@ -30,6 +31,7 @@ type Config struct {
 	MaxExec        int
 	MaxPty         int
 	AllowElevation bool
+	Audit          *audit.Logger // nil-safe; methods no-op when unset
 }
 
 // Manager tracks concurrent command executions and PTY sessions and
@@ -40,6 +42,7 @@ type Manager struct {
 	allowElevation bool
 	execSem        chan struct{}
 	ptySem         chan struct{}
+	audit          *audit.Logger
 
 	ptySessions sync.Map // sessionID -> *executor.PtySession
 }
@@ -57,6 +60,7 @@ func NewManager(cfg Config) *Manager {
 		allowElevation: cfg.AllowElevation,
 		execSem:        make(chan struct{}, cfg.MaxExec),
 		ptySem:         make(chan struct{}, cfg.MaxPty),
+		audit:          cfg.Audit,
 	}
 }
 
@@ -108,6 +112,14 @@ func (m *Manager) HandleExec(ctx context.Context, msg *protocol.ExecMessage, sen
 		log.Printf("Executing command (request_id=%q, executor=%q)", msg.RequestID, msg.ExecutorName)
 	}
 
+	m.audit.LogExecRequest(audit.ExecRequest{
+		RequestID:         msg.RequestID,
+		Executor:          msg.ExecutorName,
+		ElevationRequired: msg.ElevationRequired,
+		TimeoutSeconds:    msg.TimeoutSeconds,
+		Command:           msg.Command,
+	})
+
 	res, err := executor.ExecuteCommand(executor.ExecRequest{
 		Ctx:                ctx,
 		ScriptsDir:         m.scriptsDir,
@@ -133,6 +145,16 @@ func (m *Manager) HandleExec(ctx context.Context, msg *protocol.ExecMessage, sen
 		ExitCode:        res.ExitCode,
 		DurationSeconds: res.DurationSeconds,
 	}
+
+	m.audit.LogExecResult(audit.ExecResult{
+		RequestID:       msg.RequestID,
+		ExitCode:        res.ExitCode,
+		DurationSeconds: res.DurationSeconds,
+		StdoutBytes:     len(res.Stdout),
+		StderrBytes:     len(res.Stderr),
+		StdoutTruncated: res.StdoutTruncated,
+		StderrTruncated: res.StderrTruncated,
+	})
 
 	if err := sender.Send(out); err != nil {
 		log.Printf("Failed to send exec result (request_id=%q): %v", msg.RequestID, err)
@@ -185,6 +207,12 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 	}
 
 	log.Printf("Opening PTY session_id=%q (term=%q, %dx%d)", msg.SessionID, msg.TermType, msg.Cols, msg.Rows)
+	m.audit.LogPtyOpen(audit.PtyOpen{
+		SessionID: msg.SessionID,
+		TermType:  msg.TermType,
+		Cols:      msg.Cols,
+		Rows:      msg.Rows,
+	})
 
 	session, err := executor.NewPtySession(msg.SessionID, msg.TermType, msg.Cols, msg.Rows)
 	if err != nil {
@@ -232,6 +260,7 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 		Reason:    "session ended",
 	})
 
+	m.audit.LogPtyClose(audit.PtyClose{SessionID: msg.SessionID, Reason: "session ended"})
 	log.Printf("PTY session_id=%q closed", msg.SessionID)
 }
 

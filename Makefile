@@ -16,7 +16,7 @@ build-windows-amd64:
 	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/arktis-agent-windows-amd64.exe ./cmd/arktis-agent
 
 test:
-	go test ./...
+	go test -race ./...
 
 clean:
 	rm -rf $(DIST)
