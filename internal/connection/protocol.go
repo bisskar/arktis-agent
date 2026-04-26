@@ -6,10 +6,10 @@ package connection
 
 // RegisterMessage is sent on every WebSocket connect to identify the agent.
 type RegisterMessage struct {
-	Type         string `json:"type"`                    // "register"
-	HostID       string `json:"host_id,omitempty"`       // empty on first connect
+	Type         string `json:"type"`              // "register"
+	HostID       string `json:"host_id,omitempty"` // empty on first connect
 	Hostname     string `json:"hostname"`
-	Platform     string `json:"platform"`                // "windows" or "linux"
+	Platform     string `json:"platform"` // "windows" or "linux"
 	OsFamily     string `json:"os_family"`
 	OsVersion    string `json:"os_version"`
 	AgentVersion string `json:"agent_version"`
@@ -21,11 +21,21 @@ type HeartbeatMessage struct {
 }
 
 // ExecResultMessage reports the outcome of a command execution.
+//
+// stdout/stderr carry the process bytes verbatim (after the 1 MiB cap)
+// for terminal-aware consumers. stdout_safe/stderr_safe are the same
+// content with C0 control chars escaped, suitable for plain-text logs
+// and SIEM ingestion that would otherwise be vulnerable to log/terminal
+// injection from third-party command output.
 type ExecResultMessage struct {
 	Type            string  `json:"type"` // "exec_result"
 	RequestID       string  `json:"request_id"`
 	Stdout          string  `json:"stdout"`
 	Stderr          string  `json:"stderr"`
+	StdoutSafe      string  `json:"stdout_safe"`
+	StderrSafe      string  `json:"stderr_safe"`
+	StdoutTruncated bool    `json:"stdout_truncated"`
+	StderrTruncated bool    `json:"stderr_truncated"`
 	ExitCode        int     `json:"exit_code"`
 	DurationSeconds float64 `json:"duration_seconds"`
 }

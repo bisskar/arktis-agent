@@ -13,6 +13,16 @@ import (
 
 const maxOutputBytes = 1 * 1024 * 1024 // 1 MB
 
+// ExecResult is the outcome of running a backend-issued command.
+type ExecResult struct {
+	Stdout          string
+	Stderr          string
+	StdoutTruncated bool
+	StderrTruncated bool
+	ExitCode        int
+	DurationSeconds float64
+}
+
 // ExecuteCommand runs a command through the specified shell WITHOUT encoding.
 //
 // Commands are executed in plain text so that detection rules (EDR, Sysmon,
@@ -21,15 +31,15 @@ const maxOutputBytes = 1 * 1024 * 1024 // 1 MB
 // are invisible to most detection rules.
 //
 // Shell dispatch:
-//   - powershell  → powershell.exe -NoProfile -Command "<command>"
-//   - command_prompt → writes temp .bat file, runs cmd.exe /c <file>
-//   - bash → /bin/bash <tmp.sh>
-//   - sh   → /bin/sh   <tmp.sh>
+//   - powershell      → powershell.exe -NoProfile -Command -
+//   - command_prompt  → writes temp .bat file, runs cmd.exe /C <file>
+//   - bash            → /bin/bash <tmp.sh>
+//   - sh              → /bin/sh   <tmp.sh>
 //
 // scriptsDir is the agent-private directory used for staging temp scripts;
 // it must exist with mode 0700 (caller's responsibility). An unknown
 // executorName is rejected — we never silently downgrade to /bin/sh -c.
-func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName string, elevationRequired bool, timeoutSec int) (stdout string, stderr string, exitCode int, duration float64, err error) {
+func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName string, elevationRequired bool, timeoutSec int) (ExecResult, error) {
 	if timeoutSec <= 0 {
 		timeoutSec = 300
 	}
@@ -40,6 +50,7 @@ func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName strin
 	var (
 		cmd     *exec.Cmd
 		tmpFile string // staged script path; cleaned up below if non-empty
+		err     error
 	)
 
 	switch strings.ToLower(executorName) {
@@ -49,26 +60,28 @@ func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName strin
 	case "command_prompt":
 		cmd, tmpFile, err = buildCmdPromptCmd(cmdCtx, scriptsDir, command)
 		if err != nil {
-			return "", "", 1, 0, fmt.Errorf("stage cmd script: %w", err)
+			return ExecResult{ExitCode: 1}, fmt.Errorf("stage cmd script: %w", err)
 		}
 
 	case "bash":
 		cmd, tmpFile, err = buildShellCmd(cmdCtx, scriptsDir, command, "/bin/bash", elevationRequired)
 		if err != nil {
-			return "", "", 1, 0, fmt.Errorf("stage bash script: %w", err)
+			return ExecResult{ExitCode: 1}, fmt.Errorf("stage bash script: %w", err)
 		}
 
 	case "sh":
 		cmd, tmpFile, err = buildShellCmd(cmdCtx, scriptsDir, command, "/bin/sh", elevationRequired)
 		if err != nil {
-			return "", "", 1, 0, fmt.Errorf("stage sh script: %w", err)
+			return ExecResult{ExitCode: 1}, fmt.Errorf("stage sh script: %w", err)
 		}
 
 	default:
 		// Reject unknown executors instead of silently downgrading to the
 		// most permissive shell on the host.
-		return "", fmt.Sprintf("unknown executor_name %q (allowed: powershell, command_prompt, bash, sh)", executorName),
-			2, 0, fmt.Errorf("unknown executor_name %q", executorName)
+		return ExecResult{
+			Stderr:   fmt.Sprintf("unknown executor_name %q (allowed: powershell, command_prompt, bash, sh)", executorName),
+			ExitCode: 2,
+		}, fmt.Errorf("unknown executor_name %q", executorName)
 	}
 
 	if tmpFile != "" {
@@ -87,28 +100,33 @@ func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName strin
 
 	start := time.Now()
 	runErr := cmd.Run()
-	duration = time.Since(start).Seconds()
+	duration := time.Since(start).Seconds()
 
-	stdout = truncate(stdoutBuf.String(), maxOutputBytes)
-	stderr = truncate(stderrBuf.String(), maxOutputBytes)
+	stdout, stdoutTruncated := truncate(stdoutBuf.String(), maxOutputBytes)
+	stderr, stderrTruncated := truncate(stderrBuf.String(), maxOutputBytes)
 
-	exitCode = 0
+	res := ExecResult{
+		Stdout:          stdout,
+		Stderr:          stderr,
+		StdoutTruncated: stdoutTruncated,
+		StderrTruncated: stderrTruncated,
+		DurationSeconds: duration,
+	}
+
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
+			res.ExitCode = exitErr.ExitCode()
 		} else if cmdCtx.Err() == context.DeadlineExceeded {
-			exitCode = 124
-			stderr = truncate(stderr+"\n[TIMEOUT] Command exceeded "+fmt.Sprintf("%d", timeoutSec)+"s limit", maxOutputBytes)
-			err = fmt.Errorf("command timed out after %ds", timeoutSec)
-			return
+			res.ExitCode = 124
+			res.Stderr, res.StderrTruncated = truncate(res.Stderr+"\n[TIMEOUT] Command exceeded "+fmt.Sprintf("%d", timeoutSec)+"s limit", maxOutputBytes)
+			return res, fmt.Errorf("command timed out after %ds", timeoutSec)
 		} else {
-			exitCode = 1
-			err = fmt.Errorf("exec error: %w", runErr)
-			return
+			res.ExitCode = 1
+			return res, fmt.Errorf("exec error: %w", runErr)
 		}
 	}
 
-	return
+	return res, nil
 }
 
 // buildPowerShellCmd creates a PowerShell process that executes the command
@@ -204,9 +222,9 @@ func buildShellCmd(ctx context.Context, scriptsDir, command, shell string, eleva
 	return exec.CommandContext(ctx, shell, tmpFile), tmpFile, nil
 }
 
-func truncate(s string, maxBytes int) string {
+func truncate(s string, maxBytes int) (string, bool) {
 	if len(s) <= maxBytes {
-		return s
+		return s, false
 	}
 	// Back up to a UTF-8 rune boundary so we don't emit invalid UTF-8
 	// (which JSON encoding would later replace with U+FFFD).
@@ -214,5 +232,5 @@ func truncate(s string, maxBytes int) string {
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut] + "\n[OUTPUT TRUNCATED at 1MB]"
+	return s[:cut] + "\n[OUTPUT TRUNCATED at 1MB]", true
 }
