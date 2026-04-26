@@ -198,12 +198,12 @@ func buildCmdPromptCmd(ctx context.Context, scriptsDir, command string) (*exec.C
 	// Ensure CRLF line endings for Windows batch files.
 	script := strings.ReplaceAll(command, "\n", "\r\n")
 	if _, err := f.WriteString(script); err != nil {
-		f.Close()
-		os.Remove(tmpFile)
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
 		return nil, "", fmt.Errorf("write temp script: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmpFile)
+		_ = os.Remove(tmpFile)
 		return nil, "", fmt.Errorf("close temp script: %w", err)
 	}
 
@@ -229,12 +229,12 @@ func buildShellCmd(ctx context.Context, scriptsDir, command, shell string, eleva
 
 	script := fmt.Sprintf("#!%s\n%s\n", shell, command)
 	if _, err := f.WriteString(script); err != nil {
-		f.Close()
-		os.Remove(tmpFile)
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
 		return nil, "", fmt.Errorf("write temp script: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmpFile)
+		_ = os.Remove(tmpFile)
 		return nil, "", fmt.Errorf("close temp script: %w", err)
 	}
 

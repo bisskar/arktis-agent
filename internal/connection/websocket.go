@@ -144,13 +144,18 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 
 	// Wait for ack.
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		c.closeConn()
+		return fmt.Errorf("set ack read deadline: %w", err)
+	}
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		c.closeConn()
 		return fmt.Errorf("read ack: %w", err)
 	}
-	conn.SetReadDeadline(time.Time{}) // Clear deadline.
+	// Clear deadline; failure here is benign — we'd just time out earlier
+	// on the next read — and the connection is healthy at this point.
+	_ = conn.SetReadDeadline(time.Time{})
 
 	var base protocol.BaseMessage
 	if err := json.Unmarshal(raw, &base); err != nil {
@@ -410,7 +415,10 @@ func (c *Client) closeConn() {
 	defer c.mu.Unlock()
 
 	if c.conn != nil {
-		c.conn.Close()
+		// Close errors here are unactionable: the connection is being torn
+		// down, and any error means it was already broken from the other
+		// side. The reconnect loop handles the recovery path.
+		_ = c.conn.Close()
 		c.conn = nil
 	}
 }
@@ -419,7 +427,9 @@ func (c *Client) closeConn() {
 // Used both by the synchronous register path and by the post-handshake
 // writer goroutine.
 func writeJSON(conn *websocket.Conn, msg interface{}) error {
-	conn.SetWriteDeadline(time.Now().Add(writeWait))
+	if err := conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
 	return conn.WriteJSON(msg)
 }
 
