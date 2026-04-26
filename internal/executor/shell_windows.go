@@ -32,15 +32,10 @@ type PtySession struct {
 func NewPtySession(sessionID string, termType string, cols int, rows int) (*PtySession, error) {
 	shell := resolveWindowsShell()
 
-	if cols <= 0 {
-		cols = 80
-	}
-	if rows <= 0 {
-		rows = 24
-	}
+	colsU, rowsU := sanitizePtySize(cols, rows)
 
 	cpty, err := conpty.Start(shell,
-		conpty.ConPtyDimensions(cols, rows),
+		conpty.ConPtyDimensions(int(colsU), int(rowsU)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("start conpty with %q: %w", shell, err)
@@ -80,10 +75,8 @@ func (p *PtySession) Write(data []byte) (int, error) {
 
 // Resize changes the ConPTY window size.
 func (p *PtySession) Resize(cols int, rows int) error {
-	if cols <= 0 || rows <= 0 {
-		return nil
-	}
-	return p.cpty.Resize(cols, rows)
+	colsU, rowsU := sanitizePtySize(cols, rows)
+	return p.cpty.Resize(int(colsU), int(rowsU))
 }
 
 // Close terminates the ConPTY session.

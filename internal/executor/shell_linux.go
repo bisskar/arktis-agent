@@ -37,13 +37,8 @@ func NewPtySession(sessionID string, termType string, cols int, rows int) (*PtyS
 		return nil, fmt.Errorf("start pty: %w", err)
 	}
 
-	// Set initial window size.
-	if cols > 0 && rows > 0 {
-		pty.Setsize(ptmx, &pty.Winsize{
-			Cols: uint16(cols),
-			Rows: uint16(rows),
-		})
-	}
+	colsU, rowsU := sanitizePtySize(cols, rows)
+	pty.Setsize(ptmx, &pty.Winsize{Cols: colsU, Rows: rowsU})
 
 	return &PtySession{
 		sessionID: sessionID,
@@ -60,10 +55,8 @@ func (p *PtySession) Write(data []byte) (int, error) {
 
 // Resize changes the PTY window size.
 func (p *PtySession) Resize(cols int, rows int) error {
-	return pty.Setsize(p.pty, &pty.Winsize{
-		Cols: uint16(cols),
-		Rows: uint16(rows),
-	})
+	colsU, rowsU := sanitizePtySize(cols, rows)
+	return pty.Setsize(p.pty, &pty.Winsize{Cols: colsU, Rows: rowsU})
 }
 
 // Close terminates the PTY session.

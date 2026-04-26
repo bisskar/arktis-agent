@@ -150,8 +150,16 @@ func (c *Client) connect(ctx context.Context) error {
 		return fmt.Errorf("parse ack payload: %w", err)
 	}
 
-	// Persist host_id.
-	if ack.HostID != "" && ack.HostID != c.state.HostID {
+	// Persist host_id. The backend MUST return one — without it we have no
+	// stable identity for subsequent messages, so reject the ack and let
+	// the reconnect loop try again.
+	if ack.HostID == "" {
+		c.closeConn()
+		return fmt.Errorf("ack missing host_id")
+	}
+
+	switch {
+	case c.state.HostID == "":
 		c.state.HostID = ack.HostID
 		c.state.RegisteredAt = time.Now().UTC().Format(time.RFC3339)
 		if err := config.SaveState(c.config.StateDir, c.state); err != nil {
@@ -159,7 +167,17 @@ func (c *Client) connect(ctx context.Context) error {
 		} else {
 			log.Printf("Registered with host_id=%s", ack.HostID)
 		}
-	} else {
+	case ack.HostID != c.state.HostID:
+		// Backend reassigned us — surface this prominently so an operator
+		// can spot a rename / re-enrollment instead of silently rotating.
+		log.Printf("Warning: backend changed host_id from %s to %s; updating state",
+			c.state.HostID, ack.HostID)
+		c.state.HostID = ack.HostID
+		c.state.RegisteredAt = time.Now().UTC().Format(time.RFC3339)
+		if err := config.SaveState(c.config.StateDir, c.state); err != nil {
+			log.Printf("Warning: failed to save state: %v", err)
+		}
+	default:
 		log.Printf("Re-connected with host_id=%s", c.state.HostID)
 	}
 
@@ -224,7 +242,7 @@ func (c *Client) readLoop(ctx context.Context) {
 				log.Printf("Failed to parse exec message: %v", err)
 				continue
 			}
-			go c.manager.HandleExec(&msg, c)
+			go c.manager.HandleExec(ctx, &msg, c)
 
 		case "pty_open":
 			var msg session.PtyOpenMessage

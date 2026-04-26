@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const maxOutputBytes = 1 * 1024 * 1024 // 1 MB
@@ -185,5 +186,11 @@ func truncate(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
-	return s[:maxBytes] + "\n[OUTPUT TRUNCATED at 1MB]"
+	// Back up to a UTF-8 rune boundary so we don't emit invalid UTF-8
+	// (which JSON encoding would later replace with U+FFFD).
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\n[OUTPUT TRUNCATED at 1MB]"
 }
