@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/UserExistsError/conpty"
@@ -25,10 +26,7 @@ type PtySession struct {
 // On Windows 10 1809+ / Server 2019+, ConPTY is the modern pseudo-console
 // API. Earlier Windows versions are not supported.
 //
-// Shell resolution order:
-//  1. %COMSPEC% env var (typically cmd.exe)
-//  2. powershell.exe (via PATH)
-//  3. cmd.exe fallback
+// See resolveWindowsShell for the shell-resolution order.
 func NewPtySession(sessionID string, termType string, cols int, rows int) (*PtySession, error) {
 	shell := resolveWindowsShell()
 
@@ -36,6 +34,7 @@ func NewPtySession(sessionID string, termType string, cols int, rows int) (*PtyS
 
 	cpty, err := conpty.Start(shell,
 		conpty.ConPtyDimensions(int(colsU), int(rowsU)),
+		conpty.ConPtyEnv(minimalEnv()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("start conpty with %q: %w", shell, err)
@@ -49,23 +48,67 @@ func NewPtySession(sessionID string, termType string, cols int, rows int) (*PtyS
 }
 
 // resolveWindowsShell picks the best available shell on the host.
+//
+// Resolution order (first existing absolute path wins):
+//  1. ARKTIS_PTY_SHELL — operator override; must be an absolute path.
+//  2. %ProgramFiles%\PowerShell\7\pwsh.exe — PowerShell 7+.
+//  3. %ProgramW6432%\PowerShell\7\pwsh.exe — PS7 from a 32-bit process.
+//  4. %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe — Windows PS 5.1.
+//  5. %ComSpec% — only if absolute and exists.
+//  6. %SystemRoot%\System32\cmd.exe — last-resort absolute path.
+//
+// We deliberately never return a bare "cmd.exe" string: relying on PATH at
+// CreateProcess time would let any directory earlier on PATH (e.g. a
+// writable user dir) hijack the agent's shell.
 func resolveWindowsShell() string {
-	if comspec := os.Getenv("COMSPEC"); comspec != "" {
-		if _, err := os.Stat(comspec); err == nil {
-			return comspec
-		}
-	}
-	// Prefer powershell for a more useful interactive experience.
-	candidates := []string{
-		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-		`C:\Windows\System32\cmd.exe`,
-	}
+	candidates := windowsShellCandidates()
 	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
+		if c == "" {
+			continue
+		}
+		if !filepath.IsAbs(c) {
+			continue
+		}
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
 			return c
 		}
 	}
-	return "cmd.exe"
+	// Final guaranteed-absolute fallback. ConPTY may still fail here, but
+	// at least we won't be PATH-hijackable.
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		systemRoot = `C:\Windows`
+	}
+	fallback := filepath.Join(systemRoot, `System32`, `cmd.exe`)
+	log.Printf("Warning: no preferred shell found, using fallback %s", fallback)
+	return fallback
+}
+
+func windowsShellCandidates() []string {
+	systemRoot := os.Getenv("SystemRoot")
+	programFiles := os.Getenv("ProgramFiles")
+	programW6432 := os.Getenv("ProgramW6432")
+
+	var c []string
+	if v := os.Getenv("ARKTIS_PTY_SHELL"); v != "" {
+		c = append(c, v)
+	}
+	if programFiles != "" {
+		c = append(c, filepath.Join(programFiles, "PowerShell", "7", "pwsh.exe"))
+	}
+	if programW6432 != "" && programW6432 != programFiles {
+		c = append(c, filepath.Join(programW6432, "PowerShell", "7", "pwsh.exe"))
+	}
+	if systemRoot != "" {
+		c = append(c, filepath.Join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))
+	}
+	if comspec := os.Getenv("ComSpec"); comspec != "" && filepath.IsAbs(comspec) {
+		c = append(c, comspec)
+	}
+	if systemRoot != "" {
+		c = append(c, filepath.Join(systemRoot, "System32", "cmd.exe"))
+	}
+	return c
 }
 
 // Write sends input data to the ConPTY.

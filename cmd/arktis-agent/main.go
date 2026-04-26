@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/signal"
@@ -68,11 +70,21 @@ func main() {
 		log.Fatalf("Failed to create scripts directory %s: %v", scriptsDir, err)
 	}
 
-	// Load or create persistent state.
+	// Load or create persistent state. Only the genuine "no file yet" case
+	// should silently fall through to a fresh registration; everything else
+	// (permission denied, corrupt JSON, failing disk) must abort startup
+	// rather than silently re-register and orphan the previous host record.
 	state, err := config.LoadState(cfg.StateDir)
-	if err != nil {
-		log.Printf("No existing state found, starting fresh: %v", err)
+	switch {
+	case err == nil:
+		// proceed with the loaded state
+	case errors.Is(err, fs.ErrNotExist):
+		log.Printf("First boot: no state.json in %s, starting fresh", cfg.StateDir)
 		state = &config.State{}
+	default:
+		log.Fatalf("Failed to load state from %s: %v "+
+			"(refusing to start; fix manually or delete state.json)",
+			cfg.StateDir, err)
 	}
 
 	log.Printf("arktis-agent %s starting (state-dir=%s)", Version, cfg.StateDir)

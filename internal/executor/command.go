@@ -75,6 +75,12 @@ func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName strin
 		defer os.Remove(tmpFile)
 	}
 
+	// Strip the agent's environment from the child. We only forward a
+	// minimal set of OS env vars — anything secret-shaped that the agent
+	// inherited (ARKTIS_KEY, cloud creds, systemd EnvironmentFile entries)
+	// is deliberately excluded so a backend-issued `env` can't exfiltrate it.
+	cmd.Env = minimalEnv()
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf

@@ -8,10 +8,62 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/creack/pty"
 )
+
+// linuxShellAllowlist is the fixed set of shells the agent will fall back
+// to when $SHELL is unset or fails validation. Anything outside this list
+// can still be requested via $SHELL but only if it passes validateShell.
+var linuxShellAllowlist = []string{"/bin/bash", "/bin/sh", "/bin/zsh"}
+
+// resolveLinuxShell picks the shell used for interactive PTY sessions.
+// $SHELL is honoured only if it points at an absolute, existing, regular
+// file owned by root and not world-writable. Otherwise we fall back to a
+// fixed allowlist so an attacker who can flip env vars on the agent's
+// process token (systemd unit, scheduled task) can't pivot the agent
+// into running an arbitrary binary as root.
+func resolveLinuxShell() string {
+	if v := os.Getenv("SHELL"); v != "" {
+		if path, ok := validateShell(v); ok {
+			return path
+		}
+		log.Printf("Warning: $SHELL %q failed validation; falling back to shell allowlist", v)
+	}
+	for _, c := range linuxShellAllowlist {
+		if path, ok := validateShell(c); ok {
+			return path
+		}
+	}
+	return "/bin/sh"
+}
+
+// validateShell enforces the safety properties documented on
+// resolveLinuxShell. The returned path is filepath.Clean'd.
+func validateShell(p string) (string, bool) {
+	clean := filepath.Clean(p)
+	if !filepath.IsAbs(clean) {
+		return "", false
+	}
+	fi, err := os.Stat(clean)
+	if err != nil {
+		return "", false
+	}
+	if !fi.Mode().IsRegular() {
+		return "", false
+	}
+	if fi.Mode().Perm()&0o002 != 0 {
+		return "", false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != 0 {
+		return "", false
+	}
+	return clean, true
+}
 
 // PtySession wraps an interactive PTY shell session on Linux.
 type PtySession struct {
@@ -24,13 +76,10 @@ type PtySession struct {
 
 // NewPtySession creates and starts a new PTY session with the user's shell.
 func NewPtySession(sessionID string, termType string, cols int, rows int) (*PtySession, error) {
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/bash"
-	}
+	shell := resolveLinuxShell()
 
 	cmd := exec.Command(shell)
-	cmd.Env = append(os.Environ(), "TERM="+sanitizeTerm(termType))
+	cmd.Env = append(minimalEnv(), "TERM="+sanitizeTerm(termType))
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
