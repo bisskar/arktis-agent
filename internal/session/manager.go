@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/bisskar/arktis-agent/internal/audit"
 	"github.com/bisskar/arktis-agent/internal/executor"
@@ -19,8 +20,10 @@ type Sender interface {
 
 // Default capacity caps. Operators can override via Config.
 const (
-	defaultMaxExec = 8
-	defaultMaxPty  = 4
+	defaultMaxExec  = 8
+	defaultMaxPty   = 4
+	replayCacheSize = 1024
+	replayWindow    = 10 * time.Minute
 )
 
 // Config bundles operator-tunable knobs that flow from main into the
@@ -36,13 +39,16 @@ type Config struct {
 
 // Manager tracks concurrent command executions and PTY sessions and
 // enforces the agent's local policy: capacity limits (#16), duplicate
-// session_id rejection (#12), and the elevation opt-in gate (#6).
+// session_id rejection (#12), the elevation opt-in gate (#6), and
+// replay protection (#15).
 type Manager struct {
 	scriptsDir     string
 	allowElevation bool
 	execSem        chan struct{}
 	ptySem         chan struct{}
 	audit          *audit.Logger
+	execReplay     *Tracker
+	ptyReplay      *Tracker
 
 	ptySessions sync.Map // sessionID -> *executor.PtySession
 }
@@ -61,6 +67,8 @@ func NewManager(cfg Config) *Manager {
 		execSem:        make(chan struct{}, cfg.MaxExec),
 		ptySem:         make(chan struct{}, cfg.MaxPty),
 		audit:          cfg.Audit,
+		execReplay:     NewTracker(replayCacheSize, replayWindow),
+		ptyReplay:      NewTracker(replayCacheSize, replayWindow),
 	}
 }
 
@@ -74,6 +82,22 @@ func NewManager(cfg Config) *Manager {
 func (m *Manager) HandleExec(ctx context.Context, msg *protocol.ExecMessage, sender Sender) {
 	if !validID(msg.RequestID) {
 		log.Printf("Rejecting exec with invalid request_id %q", msg.RequestID)
+		return
+	}
+
+	// Replay gate: a captured exec frame can be replayed indefinitely
+	// without per-message signing (#9). Until then, reject any
+	// request_id seen within replayWindow with a structured 409.
+	if m.execReplay.Seen(msg.RequestID) {
+		log.Printf("Rejecting replayed exec request_id=%q", msg.RequestID)
+		const reason = "replayed request_id"
+		sender.Send(protocol.ExecResultMessage{
+			Type:       "exec_result",
+			RequestID:  msg.RequestID,
+			Stderr:     reason,
+			StderrSafe: reason,
+			ExitCode:   409,
+		})
 		return
 	}
 
@@ -175,6 +199,17 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    "invalid session_id",
+		})
+		return
+	}
+
+	// Replay gate: same rationale as HandleExec.
+	if m.ptyReplay.Seen(msg.SessionID) {
+		log.Printf("Rejecting replayed pty_open session_id=%q", msg.SessionID)
+		sender.Send(protocol.PtyClosedMessage{
+			Type:      "pty_closed",
+			SessionID: msg.SessionID,
+			Reason:    "replayed session_id",
 		})
 		return
 	}

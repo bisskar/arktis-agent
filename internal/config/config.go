@@ -9,15 +9,19 @@ import (
 
 // Config holds runtime configuration parsed from CLI flags.
 type Config struct {
-	BackendURL string
-	Key        string
-	StateDir   string
+	BackendURL     string
+	Key            string
+	StateDir       string
+	CACertPath     string // PEM file used as the *only* trusted root; empty = system roots
+	PinSPKI        string // hex SHA-256 of expected leaf SubjectPublicKeyInfo; empty = unpinned
+	StrictEndpoint bool   // refuse to reconnect to a different IP than last seen (#31)
 }
 
 // State holds persistent agent state across restarts.
 type State struct {
-	HostID       string `json:"host_id"`
-	RegisteredAt string `json:"registered_at"`
+	HostID        string `json:"host_id"`
+	RegisteredAt  string `json:"registered_at"`
+	LastBackendIP string `json:"last_backend_ip,omitempty"`
 }
 
 const stateFileName = "state.json"
