@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/bisskar/arktis-agent/internal/audit"
@@ -35,8 +37,14 @@ func defaultStateDir() string {
 }
 
 func main() {
-	url := flag.String("url", "", "Backend WebSocket URL (required)")
-	key := flag.String("key", "", "Registration key (required)")
+	urlFlag := flag.String("url", os.Getenv("ARKTIS_URL"),
+		"Backend WebSocket URL (required). Must be wss:// unless --insecure is set.")
+	keyFlag := flag.String("key", "",
+		"DEPRECATED: registration key on argv. Visible to ps/auditd. Use --key-file or ARKTIS_KEY instead.")
+	keyFilePath := flag.String("key-file", os.Getenv("ARKTIS_KEY_FILE"),
+		"Path to a file containing the registration key. Preferred over --key. File must be mode 0600 or stricter.")
+	insecure := flag.Bool("insecure", envBool("ARKTIS_INSECURE", false),
+		"Allow ws:// (plaintext) backend URLs. The dial path will log a loud warning on every connect.")
 	stateDir := flag.String("state-dir", defaultStateDir(), "Directory for persistent state")
 	allowElevation := flag.Bool("allow-elevation", envBool("ARKTIS_ALLOW_ELEVATION", false),
 		"Honour exec messages with elevation_required=true (otherwise: refuse with exit_code=126)")
@@ -64,15 +72,50 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *url == "" || *key == "" {
-		fmt.Fprintln(os.Stderr, "Error: --url and --key are required")
+	if *urlFlag == "" {
+		fmt.Fprintln(os.Stderr, "Error: --url (or ARKTIS_URL) is required")
 		flag.Usage()
 		os.Exit(1)
 	}
 
+	// Validate the backend URL scheme. wss:// is required unless the
+	// operator opts into ws:// via --insecure (or ARKTIS_INSECURE=1).
+	// Without this gate, a typo or copy-pasted dev command leaks the
+	// registration key (and every exec/PTY frame) over plaintext.
+	parsedURL, err := url.Parse(*urlFlag)
+	if err != nil {
+		log.Fatalf("Invalid --url: %v", err)
+	}
+	switch parsedURL.Scheme {
+	case "wss":
+		// fine
+	case "ws":
+		if !*insecure {
+			log.Fatalf("Refusing ws:// URL %q: TLS is required by default. "+
+				"Pass --insecure (or ARKTIS_INSECURE=1) only for local development.", *urlFlag)
+		}
+		log.Println("WARNING: TLS DISABLED. ws:// is unencrypted; the registration key " +
+			"and every exec/PTY frame are visible on the wire. Use only for local dev.")
+	default:
+		log.Fatalf("Unsupported --url scheme %q (expected wss:// or ws://)", parsedURL.Scheme)
+	}
+
+	// Resolve the registration key in priority order. We unset the env
+	// var after consuming it so a child process spawned later in this
+	// binary's lifetime cannot grep it back out.
+	resolvedKey, err := loadKey(*keyFilePath, *keyFlag)
+	if err != nil {
+		log.Fatalf("Failed to load registration key: %v", err)
+	}
+	if *keyFlag != "" {
+		log.Println("WARNING: --key on argv is deprecated and visible via /proc, ps, and auditd. " +
+			"Switch to --key-file or ARKTIS_KEY (loaded from systemd EnvironmentFile).")
+	}
+	_ = os.Unsetenv("ARKTIS_KEY")
+
 	cfg := &config.Config{
-		BackendURL:     *url,
-		Key:            *key,
+		BackendURL:     *urlFlag,
+		Key:            resolvedKey,
 		StateDir:       *stateDir,
 		CACertPath:     *caCertPath,
 		PinSPKI:        *pinSPKI,
@@ -193,6 +236,46 @@ func envBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return b
+}
+
+// loadKey resolves the registration key in priority order:
+//  1. --key-file
+//  2. ARKTIS_KEY environment variable (loaded once)
+//  3. --key on argv (deprecated)
+//
+// Returns an error if none are set. --key-file requires the file mode
+// to be 0600 or stricter on Unix; on Windows the check is a no-op.
+func loadKey(keyFilePath, keyFlag string) (string, error) {
+	if keyFilePath != "" {
+		// #nosec G304 -- operator-supplied --key-file path.
+		fi, err := os.Stat(keyFilePath)
+		if err != nil {
+			return "", fmt.Errorf("stat --key-file %s: %w", keyFilePath, err)
+		}
+		if runtime.GOOS != "windows" {
+			if mode := fi.Mode().Perm(); mode&0o077 != 0 {
+				return "", fmt.Errorf("--key-file %s has insecure permissions %o; must be 0600 or stricter",
+					keyFilePath, mode)
+			}
+		}
+		// #nosec G304 -- operator-supplied --key-file path.
+		raw, err := os.ReadFile(keyFilePath)
+		if err != nil {
+			return "", fmt.Errorf("read --key-file %s: %w", keyFilePath, err)
+		}
+		k := strings.TrimSpace(string(raw))
+		if k == "" {
+			return "", fmt.Errorf("--key-file %s is empty", keyFilePath)
+		}
+		return k, nil
+	}
+	if env := os.Getenv("ARKTIS_KEY"); env != "" {
+		return env, nil
+	}
+	if keyFlag != "" {
+		return keyFlag, nil
+	}
+	return "", errors.New("registration key not provided (set --key-file, ARKTIS_KEY, or --key)")
 }
 
 func envInt(key string, fallback int) int {
