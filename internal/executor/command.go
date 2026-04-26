@@ -13,6 +13,19 @@ import (
 
 const maxOutputBytes = 1 * 1024 * 1024 // 1 MB
 
+// ExecRequest bundles the inputs to ExecuteCommand. Using a struct keeps
+// the call site readable as the parameter list grows (e.g. opt-in
+// PowerShell preference suppression).
+type ExecRequest struct {
+	Ctx                context.Context
+	ScriptsDir         string
+	Command            string
+	ExecutorName       string
+	ElevationRequired  bool
+	TimeoutSeconds     int
+	SilencePreferences bool
+}
+
 // ExecResult is the outcome of running a backend-issued command.
 type ExecResult struct {
 	Stdout          string
@@ -31,20 +44,22 @@ type ExecResult struct {
 // are invisible to most detection rules.
 //
 // Shell dispatch:
-//   - powershell      → powershell.exe -NoProfile -Command -
+//   - powershell      → powershell.exe -NoProfile -NonInteractive -Command -
 //   - command_prompt  → writes temp .bat file, runs cmd.exe /C <file>
 //   - bash            → /bin/bash <tmp.sh>
 //   - sh              → /bin/sh   <tmp.sh>
 //
-// scriptsDir is the agent-private directory used for staging temp scripts;
-// it must exist with mode 0700 (caller's responsibility). An unknown
-// executorName is rejected — we never silently downgrade to /bin/sh -c.
-func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName string, elevationRequired bool, timeoutSec int) (ExecResult, error) {
+// req.ScriptsDir is the agent-private directory used for staging temp
+// scripts; it must exist with mode 0700 (caller's responsibility). An
+// unknown ExecutorName is rejected — we never silently downgrade to
+// /bin/sh -c.
+func ExecuteCommand(req ExecRequest) (ExecResult, error) {
+	timeoutSec := req.TimeoutSeconds
 	if timeoutSec <= 0 {
 		timeoutSec = 300
 	}
 
-	cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	cmdCtx, cancel := context.WithTimeout(req.Ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	var (
@@ -53,24 +68,24 @@ func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName strin
 		err     error
 	)
 
-	switch strings.ToLower(executorName) {
+	switch strings.ToLower(req.ExecutorName) {
 	case "powershell":
-		cmd = buildPowerShellCmd(cmdCtx, command)
+		cmd = buildPowerShellCmd(cmdCtx, req.Command, req.SilencePreferences)
 
 	case "command_prompt":
-		cmd, tmpFile, err = buildCmdPromptCmd(cmdCtx, scriptsDir, command)
+		cmd, tmpFile, err = buildCmdPromptCmd(cmdCtx, req.ScriptsDir, req.Command)
 		if err != nil {
 			return ExecResult{ExitCode: 1}, fmt.Errorf("stage cmd script: %w", err)
 		}
 
 	case "bash":
-		cmd, tmpFile, err = buildShellCmd(cmdCtx, scriptsDir, command, "/bin/bash", elevationRequired)
+		cmd, tmpFile, err = buildShellCmd(cmdCtx, req.ScriptsDir, req.Command, "/bin/bash", req.ElevationRequired)
 		if err != nil {
 			return ExecResult{ExitCode: 1}, fmt.Errorf("stage bash script: %w", err)
 		}
 
 	case "sh":
-		cmd, tmpFile, err = buildShellCmd(cmdCtx, scriptsDir, command, "/bin/sh", elevationRequired)
+		cmd, tmpFile, err = buildShellCmd(cmdCtx, req.ScriptsDir, req.Command, "/bin/sh", req.ElevationRequired)
 		if err != nil {
 			return ExecResult{ExitCode: 1}, fmt.Errorf("stage sh script: %w", err)
 		}
@@ -79,9 +94,9 @@ func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName strin
 		// Reject unknown executors instead of silently downgrading to the
 		// most permissive shell on the host.
 		return ExecResult{
-			Stderr:   fmt.Sprintf("unknown executor_name %q (allowed: powershell, command_prompt, bash, sh)", executorName),
+			Stderr:   fmt.Sprintf("unknown executor_name %q (allowed: powershell, command_prompt, bash, sh)", req.ExecutorName),
 			ExitCode: 2,
-		}, fmt.Errorf("unknown executor_name %q", executorName)
+		}, fmt.Errorf("unknown executor_name %q", req.ExecutorName)
 	}
 
 	if tmpFile != "" {
@@ -138,26 +153,33 @@ func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName strin
 // the script block content in ScriptBlock Logging (Event ID 4104) which
 // detection rules can read.
 //
-// We also set preference variables to suppress noisy output streams
-// that interfere with clean stdout/stderr capture.
-func buildPowerShellCmd(ctx context.Context, command string) *exec.Cmd {
-	// Pipe the command via stdin to avoid all quoting issues.
-	// PowerShell's -Command - reads from stdin.
-	// ScriptBlock Logging (4104) still captures the full script text.
-	preamble := "$ProgressPreference='SilentlyContinue';" +
-		"$InformationPreference='SilentlyContinue';" +
-		"$WarningPreference='SilentlyContinue';" +
-		"$ErrorActionPreference='Continue';\n"
-
-	fullScript := preamble + command
-
+// We deliberately do NOT pass -ExecutionPolicy Bypass: it's a
+// high-fidelity malicious-PowerShell indicator that EDR rules look for,
+// and the agent has no business pretending to be malware on the host.
+// If the host policy is Restricted/AllSigned the test should fail loudly
+// rather than be smuggled past it.
+//
+// silencePreferences is opt-in per-test: when false (the default), the
+// preamble is omitted so $ErrorActionPreference stays at Stop and real
+// failures surface as non-zero exit. When true, the original
+// SilentlyContinue / Continue preamble is restored for atomics that
+// depend on the legacy behaviour.
+func buildPowerShellCmd(ctx context.Context, command string, silencePreferences bool) *exec.Cmd {
 	cmd := exec.CommandContext(ctx,
 		"powershell.exe",
 		"-NoProfile",
 		"-NonInteractive",
-		"-ExecutionPolicy", "Bypass",
 		"-Command", "-",
 	)
+
+	fullScript := command
+	if silencePreferences {
+		preamble := "$ProgressPreference='SilentlyContinue';" +
+			"$InformationPreference='SilentlyContinue';" +
+			"$WarningPreference='SilentlyContinue';" +
+			"$ErrorActionPreference='Continue';\n"
+		fullScript = preamble + command
+	}
 	cmd.Stdin = strings.NewReader(fullScript)
 	return cmd
 }

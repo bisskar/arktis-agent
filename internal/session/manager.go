@@ -7,80 +7,13 @@ import (
 	"sync"
 
 	"github.com/bisskar/arktis-agent/internal/executor"
+	"github.com/bisskar/arktis-agent/internal/protocol"
 )
 
 // Sender is the interface for sending messages back to the backend.
-// This avoids a circular import with the connection package.
+// The connection package's *Client satisfies it.
 type Sender interface {
 	Send(msg interface{}) error
-}
-
-// ExecMessage mirrors connection.ExecMessage to avoid circular imports.
-type ExecMessage struct {
-	Type              string `json:"type"`
-	RequestID         string `json:"request_id"`
-	Command           string `json:"command"`
-	ExecutorName      string `json:"executor_name"`
-	ElevationRequired bool   `json:"elevation_required"`
-	TimeoutSeconds    int    `json:"timeout_seconds"`
-}
-
-// PtyOpenMessage mirrors connection.PtyOpenMessage.
-type PtyOpenMessage struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	TermType  string `json:"term_type"`
-	Cols      int    `json:"cols"`
-	Rows      int    `json:"rows"`
-}
-
-// PtyInputMessage mirrors connection.PtyInputMessage.
-type PtyInputMessage struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Data      string `json:"data"`
-}
-
-// PtyResizeMessage mirrors connection.PtyResizeMessage.
-type PtyResizeMessage struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Cols      int    `json:"cols"`
-	Rows      int    `json:"rows"`
-}
-
-// PtyCloseMessage mirrors connection.PtyCloseMessage.
-type PtyCloseMessage struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-}
-
-// ExecResultMessage mirrors connection.ExecResultMessage.
-type ExecResultMessage struct {
-	Type            string  `json:"type"`
-	RequestID       string  `json:"request_id"`
-	Stdout          string  `json:"stdout"`
-	Stderr          string  `json:"stderr"`
-	StdoutSafe      string  `json:"stdout_safe"`
-	StderrSafe      string  `json:"stderr_safe"`
-	StdoutTruncated bool    `json:"stdout_truncated"`
-	StderrTruncated bool    `json:"stderr_truncated"`
-	ExitCode        int     `json:"exit_code"`
-	DurationSeconds float64 `json:"duration_seconds"`
-}
-
-// PtyOutputMessage mirrors connection.PtyOutputMessage.
-type PtyOutputMessage struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Data      string `json:"data"`
-}
-
-// PtyClosedMessage mirrors connection.PtyClosedMessage.
-type PtyClosedMessage struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Reason    string `json:"reason"`
 }
 
 // Default capacity caps. Operators can override via Config.
@@ -134,7 +67,7 @@ func NewManager(cfg Config) *Manager {
 // ctx is the agent's root context — cancelling it (e.g. on SIGTERM) will
 // kill the child process so we don't block shutdown waiting for a long
 // command to finish.
-func (m *Manager) HandleExec(ctx context.Context, msg *ExecMessage, sender Sender) {
+func (m *Manager) HandleExec(ctx context.Context, msg *protocol.ExecMessage, sender Sender) {
 	if !validID(msg.RequestID) {
 		log.Printf("Rejecting exec with invalid request_id %q", msg.RequestID)
 		return
@@ -146,7 +79,7 @@ func (m *Manager) HandleExec(ctx context.Context, msg *ExecMessage, sender Sende
 		defer func() { <-m.execSem }()
 	default:
 		log.Printf("Rejecting exec request_id=%q: agent at exec capacity", msg.RequestID)
-		sender.Send(ExecResultMessage{
+		sender.Send(protocol.ExecResultMessage{
 			Type:       "exec_result",
 			RequestID:  msg.RequestID,
 			Stderr:     "agent at exec capacity, retry later",
@@ -160,7 +93,7 @@ func (m *Manager) HandleExec(ctx context.Context, msg *ExecMessage, sender Sende
 	if msg.ElevationRequired && !m.allowElevation {
 		log.Printf("Rejecting elevated exec request_id=%q: --allow-elevation not set", msg.RequestID)
 		const reason = "elevation refused: agent started without --allow-elevation"
-		sender.Send(ExecResultMessage{
+		sender.Send(protocol.ExecResultMessage{
 			Type:       "exec_result",
 			RequestID:  msg.RequestID,
 			Stderr:     reason,
@@ -175,19 +108,20 @@ func (m *Manager) HandleExec(ctx context.Context, msg *ExecMessage, sender Sende
 		log.Printf("Executing command (request_id=%q, executor=%q)", msg.RequestID, msg.ExecutorName)
 	}
 
-	res, err := executor.ExecuteCommand(
-		ctx,
-		m.scriptsDir,
-		msg.Command,
-		msg.ExecutorName,
-		msg.ElevationRequired,
-		msg.TimeoutSeconds,
-	)
+	res, err := executor.ExecuteCommand(executor.ExecRequest{
+		Ctx:                ctx,
+		ScriptsDir:         m.scriptsDir,
+		Command:            msg.Command,
+		ExecutorName:       msg.ExecutorName,
+		ElevationRequired:  msg.ElevationRequired,
+		TimeoutSeconds:     msg.TimeoutSeconds,
+		SilencePreferences: msg.SilencePreferences,
+	})
 	if err != nil {
 		log.Printf("Command execution error (request_id=%q): %v", msg.RequestID, err)
 	}
 
-	out := ExecResultMessage{
+	out := protocol.ExecResultMessage{
 		Type:            "exec_result",
 		RequestID:       msg.RequestID,
 		Stdout:          res.Stdout,
@@ -212,10 +146,10 @@ type ptyPlaceholder struct{}
 
 // HandlePtyOpen creates a new PTY session and starts reading output.
 // Intended to be called in a goroutine.
-func (m *Manager) HandlePtyOpen(msg *PtyOpenMessage, sender Sender) {
+func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 	if !validID(msg.SessionID) {
 		log.Printf("Rejecting pty_open with invalid session_id %q", msg.SessionID)
-		sender.Send(PtyClosedMessage{
+		sender.Send(protocol.PtyClosedMessage{
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    "invalid session_id",
@@ -229,7 +163,7 @@ func (m *Manager) HandlePtyOpen(msg *PtyOpenMessage, sender Sender) {
 		defer func() { <-m.ptySem }()
 	default:
 		log.Printf("Rejecting pty_open session_id=%q: agent at pty capacity", msg.SessionID)
-		sender.Send(PtyClosedMessage{
+		sender.Send(protocol.PtyClosedMessage{
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    "agent at pty capacity",
@@ -242,7 +176,7 @@ func (m *Manager) HandlePtyOpen(msg *PtyOpenMessage, sender Sender) {
 	placeholder := ptyPlaceholder{}
 	if _, loaded := m.ptySessions.LoadOrStore(msg.SessionID, placeholder); loaded {
 		log.Printf("Rejecting pty_open session_id=%q: duplicate", msg.SessionID)
-		sender.Send(PtyClosedMessage{
+		sender.Send(protocol.PtyClosedMessage{
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    "duplicate session_id",
@@ -257,7 +191,7 @@ func (m *Manager) HandlePtyOpen(msg *PtyOpenMessage, sender Sender) {
 		log.Printf("Failed to open PTY session_id=%q: %v", msg.SessionID, err)
 		// Drop the placeholder we reserved.
 		m.ptySessions.CompareAndDelete(msg.SessionID, placeholder)
-		sender.Send(PtyClosedMessage{
+		sender.Send(protocol.PtyClosedMessage{
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    err.Error(),
@@ -268,13 +202,20 @@ func (m *Manager) HandlePtyOpen(msg *PtyOpenMessage, sender Sender) {
 	// Replace the placeholder with the real session pointer.
 	m.ptySessions.Store(msg.SessionID, session)
 
-	// Read loop sends PTY output back to the backend.
+	// Read loop sends PTY output back to the backend. ErrSendBufferFull
+	// from the writer goroutine is treated as a per-frame drop (logged
+	// once per session, not per frame) so a chatty PTY doesn't spam.
+	dropLogged := false
 	session.ReadLoop(func(data []byte) {
-		sender.Send(PtyOutputMessage{
+		err := sender.Send(protocol.PtyOutputMessage{
 			Type:      "pty_output",
 			SessionID: msg.SessionID,
 			Data:      string(data), // Already base64-encoded by ReadLoop.
 		})
+		if err != nil && !dropLogged {
+			log.Printf("Dropping PTY output for session_id=%q (writer at capacity): %v", msg.SessionID, err)
+			dropLogged = true
+		}
 	})
 
 	// ReadLoop returned — session ended. Compare-and-delete so a later
@@ -285,7 +226,7 @@ func (m *Manager) HandlePtyOpen(msg *PtyOpenMessage, sender Sender) {
 		log.Printf("PTY close error for session_id=%q: %v", msg.SessionID, err)
 	}
 
-	sender.Send(PtyClosedMessage{
+	sender.Send(protocol.PtyClosedMessage{
 		Type:      "pty_closed",
 		SessionID: msg.SessionID,
 		Reason:    "session ended",
@@ -295,7 +236,7 @@ func (m *Manager) HandlePtyOpen(msg *PtyOpenMessage, sender Sender) {
 }
 
 // HandlePtyInput decodes base64 input and writes it to the PTY.
-func (m *Manager) HandlePtyInput(msg *PtyInputMessage) {
+func (m *Manager) HandlePtyInput(msg *protocol.PtyInputMessage) {
 	if !validID(msg.SessionID) {
 		log.Printf("Rejecting pty_input with invalid session_id %q", msg.SessionID)
 		return
@@ -325,7 +266,7 @@ func (m *Manager) HandlePtyInput(msg *PtyInputMessage) {
 }
 
 // HandlePtyResize changes the window size of a PTY session.
-func (m *Manager) HandlePtyResize(msg *PtyResizeMessage) {
+func (m *Manager) HandlePtyResize(msg *protocol.PtyResizeMessage) {
 	if !validID(msg.SessionID) {
 		log.Printf("Rejecting pty_resize with invalid session_id %q", msg.SessionID)
 		return
@@ -348,7 +289,7 @@ func (m *Manager) HandlePtyResize(msg *PtyResizeMessage) {
 }
 
 // HandlePtyClose closes a PTY session and removes it from the manager.
-func (m *Manager) HandlePtyClose(msg *PtyCloseMessage) {
+func (m *Manager) HandlePtyClose(msg *protocol.PtyCloseMessage) {
 	if !validID(msg.SessionID) {
 		log.Printf("Rejecting pty_close with invalid session_id %q", msg.SessionID)
 		return

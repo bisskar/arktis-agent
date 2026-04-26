@@ -1,4 +1,11 @@
-package connection
+// Package protocol defines the wire-format messages exchanged between
+// the arktis-agent and its backend over the WebSocket connection.
+//
+// It is a leaf package with no dependencies on other internal packages,
+// which lets both connection (the transport) and session (the handlers)
+// share a single set of struct definitions instead of mirroring them and
+// risking silent drift when fields are added or renamed.
+package protocol
 
 // ---------------------------------------------------------------------------
 // Outbound messages (agent -> backend)
@@ -65,13 +72,20 @@ type AckMessage struct {
 }
 
 // ExecMessage requests command execution on the host.
+//
+// SilencePreferences is opt-in per-test PowerShell preference suppression
+// ($ProgressPreference / $WarningPreference / $InformationPreference set
+// to SilentlyContinue, $ErrorActionPreference forced to Continue). Default
+// is false so PowerShell errors fail loudly rather than masking real
+// failures as "no output, exit 0".
 type ExecMessage struct {
-	Type              string `json:"type"` // "exec"
-	RequestID         string `json:"request_id"`
-	Command           string `json:"command"`
-	ExecutorName      string `json:"executor_name"` // powershell, bash, sh, command_prompt
-	ElevationRequired bool   `json:"elevation_required"`
-	TimeoutSeconds    int    `json:"timeout_seconds"`
+	Type               string `json:"type"` // "exec"
+	RequestID          string `json:"request_id"`
+	Command            string `json:"command"`
+	ExecutorName       string `json:"executor_name"` // powershell, bash, sh, command_prompt
+	ElevationRequired  bool   `json:"elevation_required"`
+	TimeoutSeconds     int    `json:"timeout_seconds"`
+	SilencePreferences bool   `json:"silence_preferences,omitempty"`
 }
 
 // PtyOpenMessage requests a new interactive terminal session.
