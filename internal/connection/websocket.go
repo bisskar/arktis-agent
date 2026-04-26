@@ -570,6 +570,25 @@ func (c *Client) buildTLSConfig() (*tls.Config, error) {
 			}
 			return nil
 		}
+		// VerifyPeerCertificate is only invoked on a fresh handshake;
+		// resumed sessions skip it and could land us on a cert with the
+		// wrong public key. VerifyConnection runs on every handshake
+		// (initial and resumed), so we mirror the pin check there as a
+		// belt-and-suspenders gate. We also disable session resumption
+		// outright so that pinning is enforced via the primary path,
+		// not relying on TLS-stack-internal nuance.
+		cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("tls: no peer certificate on resumed connection")
+			}
+			got := spkiHash(cs.PeerCertificates[0])
+			if got != want {
+				return fmt.Errorf("tls: SPKI pin mismatch on resumed connection (got %s, want %s)", got, want)
+			}
+			return nil
+		}
+		cfg.SessionTicketsDisabled = true
+		cfg.ClientSessionCache = nil
 	}
 
 	return cfg, nil

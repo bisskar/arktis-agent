@@ -70,7 +70,7 @@ jobs:
       # via the SARIF upload below.
       - name: Run gosec
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.22.0
           gosec -fmt sarif -out gosec.sarif -no-fail -exclude-dir=.github ./...
 
       - name: Upload SARIF

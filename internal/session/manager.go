@@ -91,7 +91,7 @@ func (m *Manager) HandleExec(ctx context.Context, msg *protocol.ExecMessage, sen
 	if m.execReplay.Seen(msg.RequestID) {
 		log.Printf("Rejecting replayed exec request_id=%q", msg.RequestID)
 		const reason = "replayed request_id"
-		sender.Send(protocol.ExecResultMessage{
+		_ = sender.Send(protocol.ExecResultMessage{
 			Type:       "exec_result",
 			RequestID:  msg.RequestID,
 			Stderr:     reason,
@@ -107,7 +107,7 @@ func (m *Manager) HandleExec(ctx context.Context, msg *protocol.ExecMessage, sen
 		defer func() { <-m.execSem }()
 	default:
 		log.Printf("Rejecting exec request_id=%q: agent at exec capacity", msg.RequestID)
-		sender.Send(protocol.ExecResultMessage{
+		_ = sender.Send(protocol.ExecResultMessage{
 			Type:       "exec_result",
 			RequestID:  msg.RequestID,
 			Stderr:     "agent at exec capacity, retry later",
@@ -121,7 +121,7 @@ func (m *Manager) HandleExec(ctx context.Context, msg *protocol.ExecMessage, sen
 	if msg.ElevationRequired && !m.allowElevation {
 		log.Printf("Rejecting elevated exec request_id=%q: --allow-elevation not set", msg.RequestID)
 		const reason = "elevation refused: agent started without --allow-elevation"
-		sender.Send(protocol.ExecResultMessage{
+		_ = sender.Send(protocol.ExecResultMessage{
 			Type:       "exec_result",
 			RequestID:  msg.RequestID,
 			Stderr:     reason,
@@ -195,7 +195,7 @@ type ptyPlaceholder struct{}
 func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 	if !validID(msg.SessionID) {
 		log.Printf("Rejecting pty_open with invalid session_id %q", msg.SessionID)
-		sender.Send(protocol.PtyClosedMessage{
+		_ = sender.Send(protocol.PtyClosedMessage{
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    "invalid session_id",
@@ -206,7 +206,7 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 	// Replay gate: same rationale as HandleExec.
 	if m.ptyReplay.Seen(msg.SessionID) {
 		log.Printf("Rejecting replayed pty_open session_id=%q", msg.SessionID)
-		sender.Send(protocol.PtyClosedMessage{
+		_ = sender.Send(protocol.PtyClosedMessage{
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    "replayed session_id",
@@ -220,7 +220,7 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 		defer func() { <-m.ptySem }()
 	default:
 		log.Printf("Rejecting pty_open session_id=%q: agent at pty capacity", msg.SessionID)
-		sender.Send(protocol.PtyClosedMessage{
+		_ = sender.Send(protocol.PtyClosedMessage{
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    "agent at pty capacity",
@@ -233,7 +233,7 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 	placeholder := ptyPlaceholder{}
 	if _, loaded := m.ptySessions.LoadOrStore(msg.SessionID, placeholder); loaded {
 		log.Printf("Rejecting pty_open session_id=%q: duplicate", msg.SessionID)
-		sender.Send(protocol.PtyClosedMessage{
+		_ = sender.Send(protocol.PtyClosedMessage{
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    "duplicate session_id",
@@ -254,7 +254,7 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 		log.Printf("Failed to open PTY session_id=%q: %v", msg.SessionID, err)
 		// Drop the placeholder we reserved.
 		m.ptySessions.CompareAndDelete(msg.SessionID, placeholder)
-		sender.Send(protocol.PtyClosedMessage{
+		_ = sender.Send(protocol.PtyClosedMessage{
 			Type:      "pty_closed",
 			SessionID: msg.SessionID,
 			Reason:    err.Error(),
@@ -289,7 +289,7 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 		log.Printf("PTY close error for session_id=%q: %v", msg.SessionID, err)
 	}
 
-	sender.Send(protocol.PtyClosedMessage{
+	_ = sender.Send(protocol.PtyClosedMessage{
 		Type:      "pty_closed",
 		SessionID: msg.SessionID,
 		Reason:    "session ended",
