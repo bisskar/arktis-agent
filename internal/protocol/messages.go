@@ -78,6 +78,11 @@ type AckMessage struct {
 // to SilentlyContinue, $ErrorActionPreference forced to Continue). Default
 // is false so PowerShell errors fail loudly rather than masking real
 // failures as "no output, exit 0".
+//
+// Signature / SignedAt provide optional per-message authentication. When
+// the agent is started with --signing-pubkey-file, it verifies the
+// Ed25519 signature over the canonical bytes returned by SigInputExec.
+// Backends that don't sign yet leave both fields empty.
 type ExecMessage struct {
 	Type               string `json:"type"` // "exec"
 	RequestID          string `json:"request_id"`
@@ -86,15 +91,21 @@ type ExecMessage struct {
 	ElevationRequired  bool   `json:"elevation_required"`
 	TimeoutSeconds     int    `json:"timeout_seconds"`
 	SilencePreferences bool   `json:"silence_preferences,omitempty"`
+	SignedAt           string `json:"signed_at,omitempty"` // RFC3339 timestamp
+	Signature          string `json:"signature,omitempty"` // base64 Ed25519 signature
 }
 
 // PtyOpenMessage requests a new interactive terminal session.
+//
+// See ExecMessage for the meaning of Signature / SignedAt.
 type PtyOpenMessage struct {
 	Type      string `json:"type"` // "pty_open"
 	SessionID string `json:"session_id"`
 	TermType  string `json:"term_type"`
 	Cols      int    `json:"cols"`
 	Rows      int    `json:"rows"`
+	SignedAt  string `json:"signed_at,omitempty"` // RFC3339 timestamp
+	Signature string `json:"signature,omitempty"` // base64 Ed25519 signature
 }
 
 // PtyInputMessage carries user keystrokes to the PTY.

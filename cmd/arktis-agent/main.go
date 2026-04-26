@@ -56,6 +56,8 @@ func main() {
 		"Path to a JSON-line audit log of every exec/pty event (file is opened with O_APPEND|O_CREAT, mode 0600). Empty disables auditing.")
 	auditIncludeCmd := flag.Bool("audit-log-include-command", envBool("ARKTIS_AUDIT_LOG_INCLUDE_COMMAND", false),
 		"Include the full command body in audit records. Default logs only a SHA-256 hash + byte count.")
+	auditChainKey := flag.String("audit-log-chain-key", os.Getenv("ARKTIS_AUDIT_LOG_CHAIN_KEY"),
+		"Path to a 32-byte HMAC key used to chain audit log records (tamper-evident). The key is generated on first run if missing. Empty disables chaining.")
 	requireNonRoot := flag.Bool("require-non-root", envBool("ARKTIS_REQUIRE_NON_ROOT", false),
 		"Refuse to start if the agent is running as root (Linux euid=0). Combine with --allow-elevation=false (the default) to enforce least privilege.")
 	caCertPath := flag.String("ca-cert", os.Getenv("ARKTIS_CA_CERT"),
@@ -64,6 +66,10 @@ func main() {
 		"Hex-encoded SHA-256 of the backend's SubjectPublicKeyInfo. The dial fails if the leaf cert's SPKI hash does not match.")
 	strictEndpoint := flag.Bool("strict-endpoint", envBool("ARKTIS_STRICT_ENDPOINT", false),
 		"Refuse to reconnect if the backend's resolved IP differs from the one captured on first connect (DNS-rebinding mitigation).")
+	signingPubkeyFile := flag.String("signing-pubkey-file", os.Getenv("ARKTIS_SIGNING_PUBKEY_FILE"),
+		"Path to a PEM-encoded Ed25519 public key. When set, exec / pty_open messages are verified against it before dispatch.")
+	requireSignature := flag.Bool("require-message-signature", envBool("ARKTIS_REQUIRE_MESSAGE_SIGNATURE", false),
+		"Reject unsigned exec / pty_open messages. Requires --signing-pubkey-file. Default lets unsigned messages through with a warning.")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -175,7 +181,11 @@ func main() {
 		log.Printf("Elevation enabled: backend-issued elevation_required=true commands will run via sudo")
 	}
 
-	auditLog, err := audit.Open(*auditLogPath, *auditIncludeCmd)
+	auditLog, err := audit.Open(audit.Options{
+		Path:           *auditLogPath,
+		IncludeCommand: *auditIncludeCmd,
+		ChainKeyPath:   *auditChainKey,
+	})
 	if err != nil {
 		log.Fatalf("Failed to open audit log: %v", err)
 	}
@@ -185,16 +195,31 @@ func main() {
 		// embedded newline/tab. gosec G706 flags this as taint, but the
 		// "attacker" here is whoever already configured the agent's CLI.
 		// #nosec G706 -- operator input, not network input.
-		log.Printf("Audit log enabled at %q (include_command=%v)", *auditLogPath, *auditIncludeCmd)
+		log.Printf("Audit log enabled at %q (include_command=%v, chain=%v)",
+			*auditLogPath, *auditIncludeCmd, *auditChainKey != "")
 	}
 
 	// Create session manager and WebSocket client.
+	signingPubkey, err := session.LoadSigningKey(*signingPubkeyFile)
+	if err != nil {
+		log.Fatalf("Failed to load --signing-pubkey-file: %v", err)
+	}
+	if *requireSignature && signingPubkey == nil {
+		log.Fatalf("--require-message-signature set but --signing-pubkey-file is empty")
+	}
+	if signingPubkey != nil {
+		log.Printf("Per-message signing enabled (require=%v)", *requireSignature)
+	}
+
 	mgr := session.NewManager(session.Config{
-		ScriptsDir:     scriptsDir,
-		MaxExec:        *maxExec,
-		MaxPty:         *maxPty,
-		AllowElevation: *allowElevation,
-		Audit:          auditLog,
+		ScriptsDir:       scriptsDir,
+		ReplayDir:        cfg.StateDir,
+		MaxExec:          *maxExec,
+		MaxPty:           *maxPty,
+		AllowElevation:   *allowElevation,
+		Audit:            auditLog,
+		SigningPubkey:    signingPubkey,
+		RequireSignature: *requireSignature,
 	})
 	client := connection.NewClient(cfg, state, mgr)
 

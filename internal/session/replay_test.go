@@ -61,3 +61,62 @@ func TestTrackerConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestTrackerPersistRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := dir + "/replay.json"
+
+	a := NewTracker(64, time.Minute)
+	a.Seen("alpha")
+	a.Seen("beta")
+	if err := a.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	b := NewTracker(64, time.Minute)
+	if err := b.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !b.Seen("alpha") {
+		t.Errorf("alpha should be remembered after reload")
+	}
+	if !b.Seen("beta") {
+		t.Errorf("beta should be remembered after reload")
+	}
+}
+
+func TestTrackerLoadMissingFileIsOK(t *testing.T) {
+	t.Parallel()
+	tr := NewTracker(8, time.Minute)
+	if err := tr.Load(t.TempDir() + "/no-such.json"); err != nil {
+		t.Errorf("missing file should not error: %v", err)
+	}
+}
+
+func TestTrackerLoadDropsExpiredEntries(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := dir + "/replay.json"
+
+	a := NewTracker(64, 100*time.Millisecond)
+	now := time.Now()
+	a.now = func() time.Time { return now }
+	a.Seen("recent")
+	// Inject an entry that is already past the TTL when we save.
+	a.mu.Lock()
+	a.seen["stale"] = now.Add(-time.Hour)
+	a.mu.Unlock()
+	if err := a.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	b := NewTracker(64, 100*time.Millisecond)
+	b.now = func() time.Time { return now }
+	if err := b.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if b.Seen("stale") {
+		t.Errorf("stale entry should have been dropped during Save/Load")
+	}
+}

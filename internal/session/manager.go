@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -31,29 +33,43 @@ const (
 // defaults documented above.
 type Config struct {
 	ScriptsDir     string
+	ReplayDir      string // dir to persist replay state under (typically StateDir); empty disables persistence
 	MaxExec        int
 	MaxPty         int
 	AllowElevation bool
 	Audit          *audit.Logger // nil-safe; methods no-op when unset
+
+	// SigningPubkey, when set, enables Ed25519 verification of every
+	// inbound exec / pty_open. RequireSignature controls whether
+	// unsigned messages are rejected (true) or allowed-with-warning
+	// (false, the default).
+	SigningPubkey    ed25519.PublicKey
+	RequireSignature bool
 }
 
 // Manager tracks concurrent command executions and PTY sessions and
 // enforces the agent's local policy: capacity limits (#16), duplicate
-// session_id rejection (#12), the elevation opt-in gate (#6), and
-// replay protection (#15).
+// session_id rejection (#12), the elevation opt-in gate (#6), replay
+// protection (#15), and (optional) per-message Ed25519 verification (#9).
 type Manager struct {
-	scriptsDir     string
-	allowElevation bool
-	execSem        chan struct{}
-	ptySem         chan struct{}
-	audit          *audit.Logger
-	execReplay     *Tracker
-	ptyReplay      *Tracker
+	scriptsDir       string
+	replayDir        string
+	allowElevation   bool
+	execSem          chan struct{}
+	ptySem           chan struct{}
+	audit            *audit.Logger
+	execReplay       *Tracker
+	ptyReplay        *Tracker
+	signingPubkey    ed25519.PublicKey
+	requireSignature bool
+	now              func() time.Time // injectable for tests
 
 	ptySessions sync.Map // sessionID -> *executor.PtySession
 }
 
-// NewManager creates a new session manager.
+// NewManager creates a new session manager. If cfg.ReplayDir is set,
+// the replay seen-set is rehydrated from disk and saved on shutdown so
+// a process restart does not re-open the replay window.
 func NewManager(cfg Config) *Manager {
 	if cfg.MaxExec <= 0 {
 		cfg.MaxExec = defaultMaxExec
@@ -61,16 +77,32 @@ func NewManager(cfg Config) *Manager {
 	if cfg.MaxPty <= 0 {
 		cfg.MaxPty = defaultMaxPty
 	}
-	return &Manager{
-		scriptsDir:     cfg.ScriptsDir,
-		allowElevation: cfg.AllowElevation,
-		execSem:        make(chan struct{}, cfg.MaxExec),
-		ptySem:         make(chan struct{}, cfg.MaxPty),
-		audit:          cfg.Audit,
-		execReplay:     NewTracker(replayCacheSize, replayWindow),
-		ptyReplay:      NewTracker(replayCacheSize, replayWindow),
+	m := &Manager{
+		scriptsDir:       cfg.ScriptsDir,
+		replayDir:        cfg.ReplayDir,
+		allowElevation:   cfg.AllowElevation,
+		execSem:          make(chan struct{}, cfg.MaxExec),
+		ptySem:           make(chan struct{}, cfg.MaxPty),
+		audit:            cfg.Audit,
+		execReplay:       NewTracker(replayCacheSize, replayWindow),
+		ptyReplay:        NewTracker(replayCacheSize, replayWindow),
+		signingPubkey:    cfg.SigningPubkey,
+		requireSignature: cfg.RequireSignature,
+		now:              time.Now,
 	}
+	if cfg.ReplayDir != "" {
+		if err := m.execReplay.Load(execReplayPath(cfg.ReplayDir)); err != nil {
+			log.Printf("Warning: failed to load exec replay state: %v", err)
+		}
+		if err := m.ptyReplay.Load(ptyReplayPath(cfg.ReplayDir)); err != nil {
+			log.Printf("Warning: failed to load pty replay state: %v", err)
+		}
+	}
+	return m
 }
+
+func execReplayPath(dir string) string { return dir + "/replay-exec.json" }
+func ptyReplayPath(dir string) string  { return dir + "/replay-pty.json" }
 
 // HandleExec executes the command directly (no encoding) and sends the
 // result back. Commands are run in plain text so detection rules can see
@@ -83,6 +115,29 @@ func (m *Manager) HandleExec(ctx context.Context, msg *protocol.ExecMessage, sen
 	if !validID(msg.RequestID) {
 		log.Printf("Rejecting exec with invalid request_id %q", msg.RequestID)
 		return
+	}
+
+	// Signature gate (#9). Enforced only when --signing-pubkey-file is
+	// configured. Unsigned messages are rejected when --require-message-
+	// signature is set, otherwise allowed with a warning.
+	if err := verifySig(m.signingPubkey, protocol.SigInputExec(msg), msg.Signature, msg.SignedAt, m.now()); err != nil {
+		if errors.Is(err, errMissingSignature) && !m.requireSignature {
+			if m.signingPubkey != nil {
+				log.Printf("Warning: unsigned exec request_id=%q (--require-message-signature not set)", msg.RequestID)
+			}
+			// fall through and run
+		} else {
+			log.Printf("Rejecting exec request_id=%q: %v", msg.RequestID, err)
+			const reason = "signature verification failed"
+			_ = sender.Send(protocol.ExecResultMessage{
+				Type:       "exec_result",
+				RequestID:  msg.RequestID,
+				Stderr:     reason,
+				StderrSafe: reason,
+				ExitCode:   401,
+			})
+			return
+		}
 	}
 
 	// Replay gate: a captured exec frame can be replayed indefinitely
@@ -201,6 +256,22 @@ func (m *Manager) HandlePtyOpen(msg *protocol.PtyOpenMessage, sender Sender) {
 			Reason:    "invalid session_id",
 		})
 		return
+	}
+
+	if err := verifySig(m.signingPubkey, protocol.SigInputPtyOpen(msg), msg.Signature, msg.SignedAt, m.now()); err != nil {
+		if errors.Is(err, errMissingSignature) && !m.requireSignature {
+			if m.signingPubkey != nil {
+				log.Printf("Warning: unsigned pty_open session_id=%q", msg.SessionID)
+			}
+		} else {
+			log.Printf("Rejecting pty_open session_id=%q: %v", msg.SessionID, err)
+			_ = sender.Send(protocol.PtyClosedMessage{
+				Type:      "pty_closed",
+				SessionID: msg.SessionID,
+				Reason:    "signature verification failed",
+			})
+			return
+		}
 	}
 
 	// Replay gate: same rationale as HandleExec.
@@ -388,7 +459,8 @@ func (m *Manager) HandlePtyClose(msg *protocol.PtyCloseMessage) {
 	log.Printf("PTY session_id=%q closed by backend", msg.SessionID)
 }
 
-// CloseAll terminates all active PTY sessions. Used during graceful shutdown.
+// CloseAll terminates all active PTY sessions and persists the replay
+// seen-set. Used during graceful shutdown.
 func (m *Manager) CloseAll() {
 	m.ptySessions.Range(func(key, val interface{}) bool {
 		session, ok := val.(*executor.PtySession)
@@ -401,4 +473,13 @@ func (m *Manager) CloseAll() {
 		m.ptySessions.Delete(key)
 		return true
 	})
+
+	if m.replayDir != "" {
+		if err := m.execReplay.Save(execReplayPath(m.replayDir)); err != nil {
+			log.Printf("Warning: failed to save exec replay state: %v", err)
+		}
+		if err := m.ptyReplay.Save(ptyReplayPath(m.replayDir)); err != nil {
+			log.Printf("Warning: failed to save pty replay state: %v", err)
+		}
+	}
 }

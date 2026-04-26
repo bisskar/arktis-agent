@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +36,7 @@ func readLines(t *testing.T, path string) []map[string]interface{} {
 
 func TestLoggerNoOpWhenPathEmpty(t *testing.T) {
 	t.Parallel()
-	l, err := Open("", false)
+	l, err := Open(Options{})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -53,7 +54,7 @@ func TestLoggerHashesCommandByDefault(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
-	l, err := Open(path, false /* includeCommand */)
+	l, err := Open(Options{Path: path})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestLoggerIncludesCommandWhenAsked(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
-	l, err := Open(path, true /* includeCommand */)
+	l, err := Open(Options{Path: path, IncludeCommand: true})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestLoggerFilePermissions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
-	l, err := Open(path, false)
+	l, err := Open(Options{Path: path})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -122,11 +123,51 @@ func TestLoggerFilePermissions(t *testing.T) {
 	}
 }
 
+func TestLoggerChainSurvivesIntactVerification(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	keyPath := filepath.Join(dir, "audit.key")
+
+	l, err := Open(Options{Path: path, IncludeCommand: true, ChainKeyPath: keyPath})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		l.LogExecRequest(ExecRequest{RequestID: "r" + strconv.Itoa(i), Command: "x"})
+		l.LogExecResult(ExecResult{RequestID: "r" + strconv.Itoa(i), ExitCode: 0})
+	}
+	_ = l.Close()
+
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key: %v", err)
+	}
+	if bad, err := Verify(path, key); err != nil || bad != 0 {
+		t.Errorf("Verify reported bad=%d err=%v on intact chain", bad, err)
+	}
+
+	// Tamper with line 3.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	lines := strings.SplitAfter(string(raw), "\n")
+	lines[2] = strings.Replace(lines[2], `"x"`, `"hacked"`, 1)
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "")), 0o600); err != nil {
+		t.Fatalf("rewrite log: %v", err)
+	}
+	bad, err := Verify(path, key)
+	if bad != 3 || err == nil {
+		t.Errorf("Verify on tampered log: bad=%d err=%v (want bad=3, err=chain mismatch)", bad, err)
+	}
+}
+
 func TestLoggerConcurrentLinesAreAtomic(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
-	l, err := Open(path, true)
+	l, err := Open(Options{Path: path, IncludeCommand: true})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
