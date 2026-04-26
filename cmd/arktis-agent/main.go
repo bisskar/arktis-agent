@@ -114,7 +114,10 @@ func main() {
 	}
 	defer auditLog.Close()
 	if *auditLogPath != "" {
-		log.Printf("Audit log enabled at %s (include_command=%v)", *auditLogPath, *auditIncludeCmd)
+		// %q quotes the operator-supplied path to keep gosec's G706
+		// log-injection rule happy and to prevent any newline/tab in
+		// a misconfigured path from breaking log lines.
+		log.Printf("Audit log enabled at %q (include_command=%v)", *auditLogPath, *auditIncludeCmd)
 	}
 
 	// Create session manager and WebSocket client.

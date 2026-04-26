@@ -32,10 +32,16 @@ type Logger struct {
 
 // Open returns a Logger that writes to path with mode 0600 (O_APPEND|O_CREAT).
 // An empty path returns a no-op Logger.
+//
+// path is intentionally operator-controlled — it comes from the
+// --audit-log CLI flag (or ARKTIS_AUDIT_LOG) and the operator chooses
+// where the agent's audit trail lives. gosec's G304 file-inclusion
+// rule does not apply here.
 func Open(path string, includeCommand bool) (*Logger, error) {
 	if path == "" {
 		return &Logger{}, nil
 	}
+	// #nosec G304 -- path is the operator-supplied audit log location.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open audit log %s: %w", path, err)
