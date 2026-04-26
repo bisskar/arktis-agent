@@ -88,7 +88,8 @@ func NewPtySession(sessionID string, termType string, cols int, rows int) (*PtyS
 	}
 
 	colsU, rowsU := sanitizePtySize(cols, rows)
-	pty.Setsize(ptmx, &pty.Winsize{Cols: colsU, Rows: rowsU})
+	// Initial winsize is best-effort; the shell will pick up SIGWINCH if it fails.
+	_ = pty.Setsize(ptmx, &pty.Winsize{Cols: colsU, Rows: rowsU})
 
 	return &PtySession{
 		sessionID: sessionID,

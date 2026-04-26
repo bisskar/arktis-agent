@@ -2,12 +2,18 @@ package connection
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -137,12 +143,41 @@ func (c *Client) connect(ctx context.Context) error {
 
 	log.Printf("Connecting to %s...", c.config.BackendURL)
 
+	tlsCfg, err := c.buildTLSConfig()
+	if err != nil {
+		return fmt.Errorf("build tls config: %w", err)
+	}
+
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
+		TLSClientConfig:  tlsCfg,
 	}
 	conn, _, err := dialer.DialContext(ctx, c.config.BackendURL, header)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
+	}
+
+	// DNS-rebinding mitigation: compare the freshly-resolved peer IP
+	// against what we recorded the first time we connected. Mismatches
+	// always log a warning; --strict-endpoint additionally refuses the
+	// connection so an operator must explicitly clear the pin before the
+	// agent will follow the hostname to a new IP.
+	if peerIP := remoteIP(conn); peerIP != "" {
+		if c.state.LastBackendIP != "" && c.state.LastBackendIP != peerIP {
+			if c.config.StrictEndpoint {
+				_ = conn.Close()
+				return fmt.Errorf("backend IP changed (was %s, now %s); refusing under --strict-endpoint",
+					c.state.LastBackendIP, peerIP)
+			}
+			log.Printf("Warning: backend IP changed (was %s, now %s); --strict-endpoint not set",
+				c.state.LastBackendIP, peerIP)
+		}
+		if c.state.LastBackendIP != peerIP {
+			c.state.LastBackendIP = peerIP
+			if err := config.SaveState(c.config.StateDir, c.state); err != nil {
+				log.Printf("Warning: failed to persist backend IP: %v", err)
+			}
+		}
 	}
 
 	c.mu.Lock()
@@ -478,6 +513,107 @@ func writeJSON(conn *websocket.Conn, msg interface{}) error {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
 	return conn.WriteJSON(msg)
+}
+
+// buildTLSConfig builds the *tls.Config the WebSocket dialer will use.
+//
+// Two operator-controlled defences-in-depth on top of system-CA trust:
+//   - --ca-cert: replaces the system root pool with a single PEM file,
+//     so a malicious CA in /etc/ssl/certs cannot mint an impersonating
+//     cert for the backend.
+//   - --pin-spki: a hex SHA-256 of the leaf cert's SubjectPublicKeyInfo.
+//     Any cert with a different public key is rejected even if it
+//     chains to a trusted root.
+//
+// Both are independent and may be combined. Returns nil if neither is
+// set, in which case gorilla/websocket falls back to its default TLS
+// behaviour (system CAs, hostname verification).
+func (c *Client) buildTLSConfig() (*tls.Config, error) {
+	if c.config.CACertPath == "" && c.config.PinSPKI == "" {
+		return nil, nil
+	}
+
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	if c.config.CACertPath != "" {
+		// #nosec G304 -- path is the operator-supplied --ca-cert flag value.
+		pem, err := os.ReadFile(c.config.CACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("read --ca-cert %s: %w", c.config.CACertPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("--ca-cert %s contained no usable PEM certificates", c.config.CACertPath)
+		}
+		cfg.RootCAs = pool
+	}
+
+	if c.config.PinSPKI != "" {
+		want := strings.ToLower(strings.TrimSpace(c.config.PinSPKI))
+		want = strings.TrimPrefix(want, "sha256:")
+		if _, err := hex.DecodeString(want); err != nil || len(want) != 64 {
+			return nil, fmt.Errorf("--pin-spki must be a 64-character hex SHA-256, got %q", c.config.PinSPKI)
+		}
+		cfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("tls: no peer certificate")
+			}
+			leaf, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("tls: parse leaf cert: %w", err)
+			}
+			got := spkiHash(leaf)
+			if got != want {
+				return fmt.Errorf("tls: SPKI pin mismatch (got %s, want %s)", got, want)
+			}
+			return nil
+		}
+		// VerifyPeerCertificate is only invoked on a fresh handshake;
+		// resumed sessions skip it and could land us on a cert with the
+		// wrong public key. VerifyConnection runs on every handshake
+		// (initial and resumed), so we mirror the pin check there as a
+		// belt-and-suspenders gate. We also disable session resumption
+		// outright so that pinning is enforced via the primary path,
+		// not relying on TLS-stack-internal nuance.
+		cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("tls: no peer certificate on resumed connection")
+			}
+			got := spkiHash(cs.PeerCertificates[0])
+			if got != want {
+				return fmt.Errorf("tls: SPKI pin mismatch on resumed connection (got %s, want %s)", got, want)
+			}
+			return nil
+		}
+		cfg.SessionTicketsDisabled = true
+		cfg.ClientSessionCache = nil
+	}
+
+	return cfg, nil
+}
+
+// spkiHash returns the lowercase hex SHA-256 of cert's
+// SubjectPublicKeyInfo. Useful both for cosign-style pinning and for
+// surfacing the value in operator logs.
+func spkiHash(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return hex.EncodeToString(sum[:])
+}
+
+// remoteIP extracts the host part of the WebSocket peer address, dropping
+// the port. Returns "" if the address can't be parsed (e.g. unix socket).
+func remoteIP(conn *websocket.Conn) string {
+	addr := conn.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return ""
+	}
+	return host
 }
 
 // getVersion returns the agent version (set via ldflags in main).

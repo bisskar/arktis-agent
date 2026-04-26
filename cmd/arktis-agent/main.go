@@ -48,6 +48,14 @@ func main() {
 		"Path to a JSON-line audit log of every exec/pty event (file is opened with O_APPEND|O_CREAT, mode 0600). Empty disables auditing.")
 	auditIncludeCmd := flag.Bool("audit-log-include-command", envBool("ARKTIS_AUDIT_LOG_INCLUDE_COMMAND", false),
 		"Include the full command body in audit records. Default logs only a SHA-256 hash + byte count.")
+	requireNonRoot := flag.Bool("require-non-root", envBool("ARKTIS_REQUIRE_NON_ROOT", false),
+		"Refuse to start if the agent is running as root (Linux euid=0). Combine with --allow-elevation=false (the default) to enforce least privilege.")
+	caCertPath := flag.String("ca-cert", os.Getenv("ARKTIS_CA_CERT"),
+		"Path to a PEM file used as the *only* trusted root for the backend's TLS cert. Defence-in-depth against system-CA compromise.")
+	pinSPKI := flag.String("pin-spki", os.Getenv("ARKTIS_PIN_SPKI"),
+		"Hex-encoded SHA-256 of the backend's SubjectPublicKeyInfo. The dial fails if the leaf cert's SPKI hash does not match.")
+	strictEndpoint := flag.Bool("strict-endpoint", envBool("ARKTIS_STRICT_ENDPOINT", false),
+		"Refuse to reconnect if the backend's resolved IP differs from the one captured on first connect (DNS-rebinding mitigation).")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -63,9 +71,12 @@ func main() {
 	}
 
 	cfg := &config.Config{
-		BackendURL: *url,
-		Key:        *key,
-		StateDir:   *stateDir,
+		BackendURL:     *url,
+		Key:            *key,
+		StateDir:       *stateDir,
+		CACertPath:     *caCertPath,
+		PinSPKI:        *pinSPKI,
+		StrictEndpoint: *strictEndpoint,
 	}
 
 	// Ensure state directory exists.
@@ -100,6 +111,19 @@ func main() {
 	}
 
 	log.Printf("arktis-agent %s starting (state-dir=%s)", Version, cfg.StateDir)
+
+	// Least-privilege gate. os.Geteuid() returns -1 on Windows, so the
+	// numerical check naturally only applies on Unix.
+	euid := os.Geteuid()
+	if *requireNonRoot && euid == 0 {
+		log.Fatalf("--require-non-root set but agent is running as root (euid=0); " +
+			"create a dedicated user (see README 'Security Model')")
+	}
+	if euid == 0 && !*allowElevation {
+		log.Println("Warning: running as root without --allow-elevation. " +
+			"The agent does not need root privileges to run non-elevated tests. " +
+			"See README 'Security Model' for least-privilege setup.")
+	}
 
 	// Inject version into the connection package for registration messages.
 	connection.SetVersion(Version)

@@ -78,20 +78,45 @@ The agent self-registers on first connect. It will appear in your Lab Hosts list
 
 ### 3. Run as a Service (Optional)
 
-**Linux (systemd):**
+The agent does **not** need root / SYSTEM to run non-elevated tests. The
+recommended setup runs the agent as a dedicated low-privilege user and
+opts elevation in only when you actually need atomics that ship
+`elevation_required=true`.
+
+**Linux (systemd, least privilege — recommended):**
 
 ```bash
-sudo tee /etc/systemd/system/arktis-agent.service > /dev/null <<EOF
+# 1. Create a dedicated user + state directory.
+sudo useradd --system --home-dir /var/lib/arktis-agent --shell /usr/sbin/nologin arktis
+sudo install -d -o arktis -g arktis -m 0700 /var/lib/arktis-agent
+
+# 2. Install the verified binary as root, run as `arktis`.
+sudo install -o root -g root -m 0755 arktis-agent /usr/local/bin/arktis-agent
+
+sudo tee /etc/systemd/system/arktis-agent.service > /dev/null <<'EOF'
 [Unit]
 Description=Arktis Agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/arktis-agent --url wss://your-server.com/api/v1/agent/ws --key <YOUR_KEY>
+User=arktis
+Group=arktis
+ExecStart=/usr/local/bin/arktis-agent \
+  --url wss://your-server.com/api/v1/agent/ws \
+  --key <YOUR_KEY> \
+  --state-dir /var/lib/arktis-agent \
+  --require-non-root \
+  --audit-log /var/lib/arktis-agent/audit.log
 Restart=always
 RestartSec=5
-User=root
+
+# Standard hardening — fail closed on anything the agent doesn't need.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/arktis-agent
 
 [Install]
 WantedBy=multi-user.target
@@ -101,16 +126,49 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now arktis-agent
 ```
 
-**Windows (as a scheduled task):**
+`--require-non-root` makes the agent fail fast if it ever finds itself
+running as `euid=0`, so a misconfigured unit can't quietly grant the
+backend root.
+
+**Linux ("Lab mode" — when you need elevation):**
+
+If your atomics include tests that require `sudo` (e.g. process
+injection, kernel-module load), pass `--allow-elevation` and grant the
+`arktis` user a *minimal* sudoers entry scoped to the agent's staged
+scripts under `/var/lib/arktis-agent/scripts/`. Do not run the agent
+itself as root.
+
+```sudoers
+# /etc/sudoers.d/arktis
+arktis ALL=(root) NOPASSWD: /bin/bash /var/lib/arktis-agent/scripts/arktis-*.sh, \
+                              /bin/sh   /var/lib/arktis-agent/scripts/arktis-*.sh
+Defaults!/bin/bash, /bin/sh env_reset
+```
+
+**Windows (managed service account — recommended):**
+
+Create a low-privilege local account (or a domain-managed service
+account / gMSA) and register the scheduled task under it instead of
+SYSTEM. Grant the account write access to `%ProgramData%\arktis-agent`.
 
 ```powershell
-$action = New-ScheduledTaskAction -Execute "$env:ProgramFiles\arktis-agent.exe" `
-  -Argument "--url wss://your-server.com/api/v1/agent/ws --key <YOUR_KEY>"
-$trigger = New-ScheduledTaskTrigger -AtStartup
+# Replace with your account; use a gMSA in domain environments.
+$cred  = Get-Credential -UserName ".\arktis-svc" -Message "Service account password"
+
+$action   = New-ScheduledTaskAction -Execute "$env:ProgramFiles\arktis-agent.exe" `
+  -Argument "--url wss://your-server.com/api/v1/agent/ws --key <YOUR_KEY> --require-non-root"
+$trigger  = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Seconds 30)
-Register-ScheduledTask -TaskName "ArktisAgent" -Action $action -Trigger $trigger `
-  -Settings $settings -User "SYSTEM" -RunLevel Highest
+
+Register-ScheduledTask -TaskName "ArktisAgent" `
+  -Action $action -Trigger $trigger -Settings $settings `
+  -User $cred.UserName -Password $cred.GetNetworkCredential().Password
 ```
+
+**Windows ("Lab mode"):** if you genuinely need SYSTEM (atomics that
+exercise kernel APIs), use `-User "SYSTEM" -RunLevel Highest` and
+`--allow-elevation` — but treat that host as fully owned by the
+backend.
 
 ## Features
 
@@ -146,16 +204,84 @@ Register-ScheduledTask -TaskName "ArktisAgent" -Action $action -Trigger $trigger
 | `--url` | `ARKTIS_URL` | (required) | Backend WebSocket URL |
 | `--key` | `ARKTIS_KEY` | (required) | Registration key from Arktis |
 | `--state-dir` | `ARKTIS_STATE_DIR` | `/etc/arktis-agent` (Linux) or `%ProgramData%\arktis-agent` (Windows) | Directory for persistent state |
+| `--require-non-root` | `ARKTIS_REQUIRE_NON_ROOT` | `false` | Refuse to start if running as root (Linux euid=0). Recommended for production. |
+| `--allow-elevation` | `ARKTIS_ALLOW_ELEVATION` | `false` | Honour `elevation_required=true` exec messages (otherwise: refuse with `exit_code=126`). |
+| `--max-exec-concurrency` | `ARKTIS_MAX_EXEC` | `8` | Max simultaneous in-flight exec commands. |
+| `--max-pty-sessions` | `ARKTIS_MAX_PTY` | `4` | Max simultaneous PTY sessions. |
+| `--audit-log` | `ARKTIS_AUDIT_LOG` | `` | Path to a JSON-line audit log of every exec/pty event. Empty disables auditing. |
+| `--audit-log-include-command` | `ARKTIS_AUDIT_LOG_INCLUDE_COMMAND` | `false` | Include the full command body in audit records (default logs only a SHA-256 + byte count). |
+| `--ca-cert` | `ARKTIS_CA_CERT` | (system) | Path to a PEM file used as the **only** trusted root for the backend's TLS cert. Defence-in-depth against system-CA compromise. |
+| `--pin-spki` | `ARKTIS_PIN_SPKI` | `` | Hex-encoded SHA-256 of the backend's SubjectPublicKeyInfo. The dial fails if the leaf cert's SPKI hash does not match. |
+| `--strict-endpoint` | `ARKTIS_STRICT_ENDPOINT` | `false` | After a successful first connect, refuse to reconnect if the backend's resolved IP changes (DNS-rebinding mitigation). |
 | `--version` | — | — | Print version and exit |
 
-## Security
+## Security Model
 
-- **Outbound only** — the agent initiates the connection. No inbound ports needed on the target host.
-- **Key-based authentication** — agents authenticate with a registration key (SHA-256 hashed server-side, never stored in plaintext).
-- **Key revocation** — revoking a key in Arktis immediately disconnects all agents using it.
-- **Per-agent revocation** — individual hosts can be deactivated without affecting other agents on the same key.
-- **TLS transport** — use `wss://` in production for encrypted communication.
-- **Org/workspace scoping** — each key is bound to one organization and optionally one workspace. Agents cannot execute commands for other tenants.
+The agent is a **remote command executor**: whoever controls the
+backend can run arbitrary commands on every connected host with the
+agent's process privileges. The trust assumptions, in order of
+strength:
+
+1. **Backend → agent**: trusted by design. Anything the backend sends
+   (an `exec` with arbitrary `command`, a `pty_open`) will run.
+2. **Agent → host**: the agent only has the privileges of the user it
+   runs as. **Run as a dedicated low-privilege user.** Root / SYSTEM
+   should be reserved for atomics that genuinely need it (see
+   "Lab mode" above).
+3. **Backend identity**: verified via system-CA TLS (`wss://`) and the
+   bearer key. Cert-pinning / message-signing is on the roadmap (#9).
+
+### What runs as root vs. the agent user
+
+| Path | Runs as |
+|------|---------|
+| Default `exec` (`elevation_required=false`) | The agent's own user |
+| `exec` with `elevation_required=true` and `--allow-elevation` set | `sudo` (Linux) / inherited token (Windows) |
+| Interactive PTY (`pty_open`) | The agent's own user |
+
+If the agent is **not** started with `--allow-elevation`, any
+`elevation_required=true` message is rejected with `exit_code=126`.
+
+### Hardening checklist for production deployments
+
+- [ ] Run as a dedicated user (`arktis` on Linux, `arktis-svc` or a
+      gMSA on Windows). Use `--require-non-root` to fail closed.
+- [ ] Verify release artifacts (`cosign verify-blob` against the
+      published signature bundle) before installing.
+- [ ] Use `wss://` for the backend URL, not `ws://`.
+- [ ] Enable the audit log (`--audit-log /var/lib/arktis-agent/audit.log`)
+      and ship it to a central SIEM.
+- [ ] Set `--max-exec-concurrency` and `--max-pty-sessions` consistent
+      with the host's capacity.
+- [ ] Apply the sudoers fragment above instead of granting blanket
+      `NOPASSWD: ALL` if you need elevation.
+- [ ] Rotate the registration key on operator off-boarding.
+
+### Built-in defences
+
+- **Outbound only** — the agent initiates the connection. No inbound
+  ports needed on the target host.
+- **Key-based authentication** — agents authenticate with a
+  registration key (SHA-256 hashed server-side, never stored in
+  plaintext).
+- **Key revocation** — revoking a key in Arktis immediately
+  disconnects all agents using it.
+- **Per-agent revocation** — individual hosts can be deactivated
+  without affecting other agents on the same key.
+- **TLS transport** — use `wss://` in production for encrypted
+  communication.
+- **Org/workspace scoping** — each key is bound to one organization
+  and optionally one workspace. Agents cannot execute commands for
+  other tenants.
+- **Capacity caps** — `--max-exec-concurrency` and
+  `--max-pty-sessions` (defaults 8 and 4) bound the resources a
+  misbehaving / compromised backend can consume.
+- **Stripped child env** — spawned shells receive a minimal
+  whitelisted env; `ARKTIS_KEY`, `AWS_*`, `LD_PRELOAD`, etc. are
+  never inherited.
+- **Sanitised result fields** — `stdout_safe` / `stderr_safe`
+  carry an escape-stripped variant of process output for
+  log/SIEM ingestion that is sensitive to control bytes.
 
 ## Building from Source
 
