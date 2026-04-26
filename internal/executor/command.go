@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,9 +23,13 @@ const maxOutputBytes = 1 * 1024 * 1024 // 1 MB
 // Shell dispatch:
 //   - powershell  → powershell.exe -NoProfile -Command "<command>"
 //   - command_prompt → writes temp .bat file, runs cmd.exe /c <file>
-//   - bash → /bin/bash -c "<command>"
-//   - sh   → /bin/sh -c "<command>"
-func ExecuteCommand(ctx context.Context, command string, executorName string, elevationRequired bool, timeoutSec int) (stdout string, stderr string, exitCode int, duration float64, err error) {
+//   - bash → /bin/bash <tmp.sh>
+//   - sh   → /bin/sh   <tmp.sh>
+//
+// scriptsDir is the agent-private directory used for staging temp scripts;
+// it must exist with mode 0700 (caller's responsibility). An unknown
+// executorName is rejected — we never silently downgrade to /bin/sh -c.
+func ExecuteCommand(ctx context.Context, scriptsDir, command, executorName string, elevationRequired bool, timeoutSec int) (stdout string, stderr string, exitCode int, duration float64, err error) {
 	if timeoutSec <= 0 {
 		timeoutSec = 300
 	}
@@ -35,31 +37,42 @@ func ExecuteCommand(ctx context.Context, command string, executorName string, el
 	cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-	var cmd *exec.Cmd
+	var (
+		cmd     *exec.Cmd
+		tmpFile string // staged script path; cleaned up below if non-empty
+	)
 
 	switch strings.ToLower(executorName) {
 	case "powershell":
 		cmd = buildPowerShellCmd(cmdCtx, command)
 
 	case "command_prompt":
-		cmd, err = buildCmdPromptCmd(cmdCtx, command)
+		cmd, tmpFile, err = buildCmdPromptCmd(cmdCtx, scriptsDir, command)
 		if err != nil {
-			return "", "", 1, 0, fmt.Errorf("failed to prepare cmd script: %w", err)
+			return "", "", 1, 0, fmt.Errorf("stage cmd script: %w", err)
 		}
 
 	case "bash":
-		cmd = buildBashCmd(cmdCtx, command, elevationRequired)
+		cmd, tmpFile, err = buildShellCmd(cmdCtx, scriptsDir, command, "/bin/bash", elevationRequired)
+		if err != nil {
+			return "", "", 1, 0, fmt.Errorf("stage bash script: %w", err)
+		}
 
 	case "sh":
-		cmd = buildShCmd(cmdCtx, command, elevationRequired)
+		cmd, tmpFile, err = buildShellCmd(cmdCtx, scriptsDir, command, "/bin/sh", elevationRequired)
+		if err != nil {
+			return "", "", 1, 0, fmt.Errorf("stage sh script: %w", err)
+		}
 
 	default:
-		// Unknown executor — try to run directly
-		if runtime.GOOS == "windows" {
-			cmd = exec.CommandContext(cmdCtx, "cmd.exe", "/C", command)
-		} else {
-			cmd = exec.CommandContext(cmdCtx, "/bin/sh", "-c", command)
-		}
+		// Reject unknown executors instead of silently downgrading to the
+		// most permissive shell on the host.
+		return "", fmt.Sprintf("unknown executor_name %q (allowed: powershell, command_prompt, bash, sh)", executorName),
+			2, 0, fmt.Errorf("unknown executor_name %q", executorName)
+	}
+
+	if tmpFile != "" {
+		defer os.Remove(tmpFile)
 	}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -94,7 +107,9 @@ func ExecuteCommand(ctx context.Context, command string, executorName string, el
 
 // buildPowerShellCmd creates a PowerShell process that executes the command
 // via stdin piping. The process command line shows:
-//   powershell.exe -NoProfile -NonInteractive -Command -
+//
+//	powershell.exe -NoProfile -NonInteractive -Command -
+//
 // and the actual command goes through stdin, but PowerShell still logs
 // the script block content in ScriptBlock Logging (Event ID 4104) which
 // detection rules can read.
@@ -123,63 +138,64 @@ func buildPowerShellCmd(ctx context.Context, command string) *exec.Cmd {
 	return cmd
 }
 
-// buildCmdPromptCmd writes the command to a temp .bat file and executes it
-// with cmd.exe /c. The process tree shows the actual batch commands.
-// The temp file is cleaned up after execution.
-func buildCmdPromptCmd(ctx context.Context, command string) (*exec.Cmd, error) {
-	// Write to temp .bat file — avoids quoting issues entirely.
-	// cmd.exe runs the file directly, so the commands are visible in
-	// process creation events and file system monitoring.
-	tmpDir := os.TempDir()
-	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("arktis_%d.bat", time.Now().UnixNano()))
+// buildCmdPromptCmd writes the command to a temp .bat file under scriptsDir
+// (created with mode 0600 + an unguessable suffix via os.CreateTemp) and
+// executes it with cmd.exe /c. The caller is responsible for removing the
+// returned path.
+func buildCmdPromptCmd(ctx context.Context, scriptsDir, command string) (*exec.Cmd, string, error) {
+	f, err := os.CreateTemp(scriptsDir, "arktis-*.bat")
+	if err != nil {
+		return nil, "", fmt.Errorf("create temp script: %w", err)
+	}
+	tmpFile := f.Name()
 
-	// Ensure CRLF line endings for Windows batch files, append self-cleanup
+	// Ensure CRLF line endings for Windows batch files.
 	script := strings.ReplaceAll(command, "\n", "\r\n")
-	script += "\r\ndel /Q \"" + tmpFile + "\" >nul 2>&1\r\n"
-
-	if err := os.WriteFile(tmpFile, []byte(script), 0644); err != nil {
-		return nil, err
+	if _, err := f.WriteString(script); err != nil {
+		f.Close()
+		os.Remove(tmpFile)
+		return nil, "", fmt.Errorf("write temp script: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpFile)
+		return nil, "", fmt.Errorf("close temp script: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "cmd.exe", "/C", tmpFile)
-	return cmd, nil
+	return exec.CommandContext(ctx, "cmd.exe", "/C", tmpFile), tmpFile, nil
 }
 
-// buildBashCmd writes the command to a temp .sh script and executes it.
+// buildShellCmd writes the command to a temp .sh script under scriptsDir
+// (created with mode 0600 + an unguessable suffix via os.CreateTemp) and
+// returns a Cmd that invokes `<shell> <tmpFile>`. The caller is responsible
+// for removing the returned path.
 //
-// Why not bash -c? Complex ART commands contain quotes, $variables,
-// backticks, pipes, and multi-line heredocs that break shell argument
-// parsing. A temp file avoids all escaping issues.
-//
-// Detection visibility:
-//   - Process tree shows: /bin/bash /tmp/arktis_xxx.sh
-//   - Each command inside the script spawns child processes with
-//     their full command lines visible to auditd/sysmon
-//   - File integrity monitoring can read the script content
-//   - The script is cleaned up after execution
-func buildBashCmd(ctx context.Context, command string, elevationRequired bool) *exec.Cmd {
-	return buildShellScript(ctx, command, "/bin/bash", elevationRequired)
-}
+// Why not bash -c? Complex commands contain quotes, $variables, backticks,
+// pipes, and multi-line heredocs that break shell argument parsing. A temp
+// file avoids all escaping issues. Detection visibility is preserved
+// because each command inside the script spawns a child process with its
+// full command line visible to auditd/sysmon.
+func buildShellCmd(ctx context.Context, scriptsDir, command, shell string, elevationRequired bool) (*exec.Cmd, string, error) {
+	f, err := os.CreateTemp(scriptsDir, "arktis-*.sh")
+	if err != nil {
+		return nil, "", fmt.Errorf("create temp script: %w", err)
+	}
+	tmpFile := f.Name()
 
-// buildShCmd writes the command to a temp .sh script and executes it via sh.
-func buildShCmd(ctx context.Context, command string, elevationRequired bool) *exec.Cmd {
-	return buildShellScript(ctx, command, "/bin/sh", elevationRequired)
-}
-
-// buildShellScript writes a command to a temp script and returns a Cmd to run it.
-// The script is self-deleting (trap on EXIT removes the temp file).
-func buildShellScript(ctx context.Context, command string, shell string, elevationRequired bool) *exec.Cmd {
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("arktis_%d.sh", time.Now().UnixNano()))
-
-	// Prepend a self-cleanup trap and a shebang
-	script := fmt.Sprintf("#!%s\ntrap 'rm -f \"%s\"' EXIT\n%s\n", shell, tmpFile, command)
-	// Best-effort write — if it fails, exec will fail with a clear error
-	os.WriteFile(tmpFile, []byte(script), 0700)
+	script := fmt.Sprintf("#!%s\n%s\n", shell, command)
+	if _, err := f.WriteString(script); err != nil {
+		f.Close()
+		os.Remove(tmpFile)
+		return nil, "", fmt.Errorf("write temp script: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpFile)
+		return nil, "", fmt.Errorf("close temp script: %w", err)
+	}
 
 	if elevationRequired {
-		return exec.CommandContext(ctx, "sudo", shell, tmpFile)
+		return exec.CommandContext(ctx, "sudo", shell, tmpFile), tmpFile, nil
 	}
-	return exec.CommandContext(ctx, shell, tmpFile)
+	return exec.CommandContext(ctx, shell, tmpFile), tmpFile, nil
 }
 
 func truncate(s string, maxBytes int) string {

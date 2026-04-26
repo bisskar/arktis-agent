@@ -30,7 +30,7 @@ func NewPtySession(sessionID string, termType string, cols int, rows int) (*PtyS
 	}
 
 	cmd := exec.Command(shell)
-	cmd.Env = append(os.Environ(), "TERM="+termType)
+	cmd.Env = append(os.Environ(), "TERM="+sanitizeTerm(termType))
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -61,18 +61,25 @@ func (p *PtySession) Resize(cols int, rows int) error {
 
 // Close terminates the PTY session.
 func (p *PtySession) Close() error {
-	var err error
+	var firstErr error
 	p.once.Do(func() {
 		close(p.done)
 		if p.pty != nil {
-			p.pty.Close()
+			if err := p.pty.Close(); err != nil {
+				firstErr = err
+			}
 		}
 		if p.cmd != nil && p.cmd.Process != nil {
-			p.cmd.Process.Kill()
-			p.cmd.Wait()
+			if err := p.cmd.Process.Kill(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			// Wait reaps the process; an error here typically just
+			// means the child already exited from Kill, so we don't
+			// surface it.
+			_ = p.cmd.Wait()
 		}
 	})
-	return err
+	return firstErr
 }
 
 // ReadLoop reads PTY output in a loop, calling send with base64-encoded chunks.
