@@ -29,7 +29,6 @@ type Client struct {
 	conn    *websocket.Conn
 	manager *session.Manager
 	mu      sync.Mutex
-	done    chan struct{}
 }
 
 // NewClient creates a new WebSocket client.
@@ -38,7 +37,6 @@ func NewClient(cfg *config.Config, state *config.State, mgr *session.Manager) *C
 		config:  cfg,
 		state:   state,
 		manager: mgr,
-		done:    make(chan struct{}, 1),
 	}
 }
 
@@ -103,7 +101,6 @@ func (c *Client) connect(ctx context.Context) error {
 
 	c.mu.Lock()
 	c.conn = conn
-	c.done = make(chan struct{}, 1)
 	c.mu.Unlock()
 
 	log.Println("WebSocket connected, sending registration...")
@@ -184,10 +181,16 @@ func (c *Client) connect(ctx context.Context) error {
 	// Connection established — reset backoff is handled by the caller observing success.
 	// We signal success by running the read loop (which blocks until disconnect).
 
-	// Start heartbeat goroutine.
+	// Start heartbeat goroutine. Both the per-connection done channel and
+	// the cancel func are scoped to this call frame: deferred close/cancel
+	// guarantees the heartbeat goroutine winds down before connect()
+	// returns, so a stale goroutine from a previous connection can never
+	// leak into the next one.
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
-	go c.heartbeatLoop(hbCtx)
+	hbDone := make(chan struct{})
+	defer close(hbDone)
+	go c.heartbeatLoop(hbCtx, hbDone)
 
 	// Close the websocket when the context is cancelled. This unblocks
 	// conn.ReadMessage() in the read loop so graceful shutdown doesn't
@@ -287,7 +290,9 @@ func (c *Client) readLoop(ctx context.Context) {
 }
 
 // heartbeatLoop sends heartbeat messages at regular intervals.
-func (c *Client) heartbeatLoop(ctx context.Context) {
+// done is closed by the connect() call frame to terminate the loop on
+// disconnect; ctx covers root-shutdown.
+func (c *Client) heartbeatLoop(ctx context.Context, done <-chan struct{}) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -295,7 +300,7 @@ func (c *Client) heartbeatLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-c.done:
+		case <-done:
 			return
 		case <-ticker.C:
 			if err := c.Send(HeartbeatMessage{Type: "heartbeat"}); err != nil {
@@ -319,7 +324,10 @@ func (c *Client) Send(msg interface{}) error {
 	return c.conn.WriteJSON(msg)
 }
 
-// closeConn safely closes the WebSocket connection.
+// closeConn safely closes the WebSocket connection. The per-connection
+// heartbeat goroutine is wound down by connect()'s deferred close(hbDone)
+// rather than by this function — closeConn may be called multiple times
+// (read-loop exit, ctx-cancel goroutine) and must remain idempotent.
 func (c *Client) closeConn() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -327,12 +335,6 @@ func (c *Client) closeConn() {
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
-	}
-
-	// Signal done to heartbeat loop (non-blocking).
-	select {
-	case c.done <- struct{}{}:
-	default:
 	}
 }
 

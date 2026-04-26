@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 
@@ -58,6 +59,15 @@ func main() {
 		log.Fatalf("Failed to create state directory %s: %v", cfg.StateDir, err)
 	}
 
+	// Stage exec scripts under the agent's private state dir rather than
+	// the shared system temp — keeps payloads (which may contain secrets)
+	// off a world-readable path and removes the predictable-name TOCTOU
+	// vector.
+	scriptsDir := filepath.Join(cfg.StateDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0700); err != nil {
+		log.Fatalf("Failed to create scripts directory %s: %v", scriptsDir, err)
+	}
+
 	// Load or create persistent state.
 	state, err := config.LoadState(cfg.StateDir)
 	if err != nil {
@@ -71,7 +81,7 @@ func main() {
 	connection.SetVersion(Version)
 
 	// Create session manager and WebSocket client.
-	mgr := session.NewManager()
+	mgr := session.NewManager(scriptsDir)
 	client := connection.NewClient(cfg, state, mgr)
 
 	// Context with OS signal cancellation.

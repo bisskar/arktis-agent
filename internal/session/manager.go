@@ -82,11 +82,14 @@ type PtyClosedMessage struct {
 // Manager tracks concurrent command executions and PTY sessions.
 type Manager struct {
 	ptySessions sync.Map // sessionID -> *executor.PtySession
+	scriptsDir  string   // agent-private dir for staging exec scripts
 }
 
-// NewManager creates a new session manager.
-func NewManager() *Manager {
-	return &Manager{}
+// NewManager creates a new session manager. scriptsDir must already exist
+// with mode 0700; ExecuteCommand stages each command's temp script there
+// instead of in the world-readable system temp directory.
+func NewManager(scriptsDir string) *Manager {
+	return &Manager{scriptsDir: scriptsDir}
 }
 
 // HandleExec executes the command directly (no encoding) and sends the result back.
@@ -101,6 +104,7 @@ func (m *Manager) HandleExec(ctx context.Context, msg *ExecMessage, sender Sende
 
 	stdout, stderr, exitCode, duration, err := executor.ExecuteCommand(
 		ctx,
+		m.scriptsDir,
 		msg.Command,
 		msg.ExecutorName,
 		msg.ElevationRequired,
@@ -153,7 +157,9 @@ func (m *Manager) HandlePtyOpen(msg *PtyOpenMessage, sender Sender) {
 
 	// ReadLoop returned — session ended.
 	m.ptySessions.Delete(msg.SessionID)
-	session.Close()
+	if err := session.Close(); err != nil {
+		log.Printf("PTY close error for session %s: %v", msg.SessionID, err)
+	}
 
 	sender.Send(PtyClosedMessage{
 		Type:      "pty_closed",
@@ -207,7 +213,9 @@ func (m *Manager) HandlePtyClose(msg *PtyCloseMessage) {
 	}
 
 	session := val.(*executor.PtySession)
-	session.Close()
+	if err := session.Close(); err != nil {
+		log.Printf("PTY close error for session %s: %v", msg.SessionID, err)
+	}
 	m.ptySessions.Delete(msg.SessionID)
 	log.Printf("PTY session %s closed by backend", msg.SessionID)
 }
@@ -216,7 +224,9 @@ func (m *Manager) HandlePtyClose(msg *PtyCloseMessage) {
 func (m *Manager) CloseAll() {
 	m.ptySessions.Range(func(key, val interface{}) bool {
 		session := val.(*executor.PtySession)
-		session.Close()
+		if err := session.Close(); err != nil {
+			log.Printf("PTY close error for session %s during shutdown: %v", key, err)
+		}
 		m.ptySessions.Delete(key)
 		log.Printf("Closed PTY session %s during shutdown", key)
 		return true
