@@ -114,9 +114,10 @@ func main() {
 	}
 	defer auditLog.Close()
 	if *auditLogPath != "" {
-		// %q quotes the operator-supplied path to keep gosec's G706
-		// log-injection rule happy and to prevent any newline/tab in
-		// a misconfigured path from breaking log lines.
+		// Operator-supplied path (--audit-log flag); %q neutralises any
+		// embedded newline/tab. gosec G706 flags this as taint, but the
+		// "attacker" here is whoever already configured the agent's CLI.
+		// #nosec G706 -- operator input, not network input.
 		log.Printf("Audit log enabled at %q (include_command=%v)", *auditLogPath, *auditIncludeCmd)
 	}
 
@@ -163,6 +164,7 @@ func envBool(key string, fallback bool) bool {
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
+		// #nosec G706 -- operator-supplied env var; %q neutralises escapes.
 		log.Printf("Warning: ignoring %s=%q: %v", key, v, err)
 		return fallback
 	}
@@ -176,6 +178,7 @@ func envInt(key string, fallback int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
+		// #nosec G706 -- operator-supplied env var; %q neutralises escapes.
 		log.Printf("Warning: ignoring %s=%q: must be a positive integer", key, v)
 		return fallback
 	}
