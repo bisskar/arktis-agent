@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bisskar/arktis-agent/internal/config"
@@ -39,15 +40,41 @@ var ErrSendBufferFull = errors.New("send buffer full")
 // writer goroutine were ready, or after they wound down.
 var errNotConnected = errors.New("not connected")
 
+// errStaleConnection indicates a handler from a previous connection
+// generation tried to write after the agent had reconnected. The send
+// is dropped to avoid leaking a stale exec_result / pty_output onto the
+// new connection where the backend may have already given up on it.
+var errStaleConnection = errors.New("stale connection")
+
 // Client manages the WebSocket connection to the backend.
 type Client struct {
 	config  *config.Config
 	state   *config.State
 	manager *session.Manager
 
+	// gen is bumped on every connect() entry and again on closeConn so
+	// that any handler still holding a connSender from a previous
+	// connection observes the change and drops its writes.
+	gen atomic.Uint64
+
 	mu   sync.Mutex
 	conn *websocket.Conn  // active connection or nil
 	out  chan interface{} // active send queue or nil; drained by writer goroutine
+}
+
+// connSender is the per-connection Sender handed to handler goroutines.
+// It carries the generation number captured at the moment connect()
+// installed the queue, so a write from an outdated handler can be
+// rejected before it reaches the (possibly reused) write channel.
+type connSender struct {
+	c   *Client
+	gen uint64
+}
+
+// Send routes through the Client's gen-checked send path. Implements
+// session.Sender.
+func (s connSender) Send(msg interface{}) error {
+	return s.c.sendForGen(s.gen, msg)
 }
 
 // NewClient creates a new WebSocket client.
@@ -209,10 +236,16 @@ func (c *Client) connect(ctx context.Context) error {
 	// All post-handshake Send() calls go through this queue so a chatty PTY
 	// can no longer hold a single mutex and starve heartbeats / other sessions.
 	out := make(chan interface{}, sendBufSize)
+	myGen := c.gen.Add(1)
 	c.mu.Lock()
 	c.out = out
 	c.mu.Unlock()
 	defer func() {
+		// Bump gen so any in-flight handler holding a connSender for myGen
+		// observes a stale connection and drops its writes. This must
+		// happen before we tear the queue down so writes already past
+		// the gen check still see a live channel.
+		c.gen.Add(1)
 		c.mu.Lock()
 		if c.out == out {
 			c.out = nil
@@ -220,6 +253,8 @@ func (c *Client) connect(ctx context.Context) error {
 		c.mu.Unlock()
 		close(out)
 	}()
+
+	sender := connSender{c: c, gen: myGen}
 
 	writerDone := make(chan struct{})
 	go func() {
@@ -237,7 +272,7 @@ func (c *Client) connect(ctx context.Context) error {
 	defer hbCancel()
 	hbDone := make(chan struct{})
 	defer close(hbDone)
-	go c.heartbeatLoop(hbCtx, hbDone)
+	go c.heartbeatLoop(hbCtx, hbDone, sender)
 
 	// Close the websocket when the context is cancelled. This unblocks
 	// conn.ReadMessage() in the read loop so graceful shutdown doesn't
@@ -253,7 +288,7 @@ func (c *Client) connect(ctx context.Context) error {
 	defer close(closeOnCancelDone)
 
 	// Read loop blocks until error or context cancellation.
-	c.readLoop(ctx, conn)
+	c.readLoop(ctx, conn, sender)
 
 	return nil
 }
@@ -283,7 +318,12 @@ func (c *Client) writeLoop(ctx context.Context, conn *websocket.Conn, out <-chan
 }
 
 // readLoop reads and dispatches messages from the backend.
-func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) {
+//
+// sender is the connSender stamped with this connection's generation;
+// handlers spawned here use it for their replies, so any write that
+// outlives this connection harmlessly errors out instead of landing on
+// the next one.
+func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, sender connSender) {
 	defer c.closeConn()
 
 	for {
@@ -316,7 +356,7 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) {
 				log.Printf("Failed to parse exec message: %v", err)
 				continue
 			}
-			go c.manager.HandleExec(ctx, &msg, c)
+			go c.manager.HandleExec(ctx, &msg, sender)
 
 		case "pty_open":
 			var msg protocol.PtyOpenMessage
@@ -324,7 +364,7 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) {
 				log.Printf("Failed to parse pty_open message: %v", err)
 				continue
 			}
-			go c.manager.HandlePtyOpen(&msg, c)
+			go c.manager.HandlePtyOpen(&msg, sender)
 
 		case "pty_input":
 			var msg protocol.PtyInputMessage
@@ -360,10 +400,10 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-// heartbeatLoop sends heartbeat messages at regular intervals.
-// done is closed by the connect() call frame to terminate the loop on
-// disconnect; ctx covers root-shutdown.
-func (c *Client) heartbeatLoop(ctx context.Context, done <-chan struct{}) {
+// heartbeatLoop sends heartbeat messages at regular intervals through
+// the per-connection sender. done is closed by the connect() call frame
+// to terminate the loop on disconnect; ctx covers root-shutdown.
+func (c *Client) heartbeatLoop(ctx context.Context, done <-chan struct{}, sender connSender) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -374,7 +414,7 @@ func (c *Client) heartbeatLoop(ctx context.Context, done <-chan struct{}) {
 		case <-done:
 			return
 		case <-ticker.C:
-			if err := c.Send(protocol.HeartbeatMessage{Type: "heartbeat"}); err != nil {
+			if err := sender.Send(protocol.HeartbeatMessage{Type: "heartbeat"}); err != nil {
 				log.Printf("Failed to enqueue heartbeat: %v", err)
 				// Don't return on a backpressure-only failure — we'll
 				// try again next tick. A genuine teardown is signalled
@@ -387,11 +427,18 @@ func (c *Client) heartbeatLoop(ctx context.Context, done <-chan struct{}) {
 	}
 }
 
-// Send enqueues msg onto the writer goroutine's queue. It is non-blocking:
-// if the queue is full it returns ErrSendBufferFull immediately so a
-// misbehaving sender (e.g. a chatty PTY) can never starve other senders
-// or hold a write mutex across slow network frames.
-func (c *Client) Send(msg interface{}) error {
+// sendForGen enqueues msg onto the writer goroutine's queue, but only
+// if gen still matches the current connection generation. A handler
+// holding a sender from a previous connection will see ErrStaleConnection
+// and drop the write rather than land it on the new connection.
+//
+// Like Send before it, this is non-blocking: when the queue is full it
+// returns ErrSendBufferFull immediately so a misbehaving producer (e.g.
+// a chatty PTY) can never starve other senders.
+func (c *Client) sendForGen(gen uint64, msg interface{}) error {
+	if c.gen.Load() != gen {
+		return errStaleConnection
+	}
 	c.mu.Lock()
 	out := c.out
 	c.mu.Unlock()

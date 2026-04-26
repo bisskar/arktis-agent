@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/bisskar/arktis-agent/internal/audit"
 	"github.com/bisskar/arktis-agent/internal/config"
 	"github.com/bisskar/arktis-agent/internal/connection"
 	"github.com/bisskar/arktis-agent/internal/session"
@@ -43,6 +44,10 @@ func main() {
 		"Maximum simultaneous in-flight exec commands; further requests are rejected with exit_code=503")
 	maxPty := flag.Int("max-pty-sessions", envInt("ARKTIS_MAX_PTY", 4),
 		"Maximum simultaneous PTY sessions; further opens are rejected with reason=\"agent at pty capacity\"")
+	auditLogPath := flag.String("audit-log", os.Getenv("ARKTIS_AUDIT_LOG"),
+		"Path to a JSON-line audit log of every exec/pty event (file is opened with O_APPEND|O_CREAT, mode 0600). Empty disables auditing.")
+	auditIncludeCmd := flag.Bool("audit-log-include-command", envBool("ARKTIS_AUDIT_LOG_INCLUDE_COMMAND", false),
+		"Include the full command body in audit records. Default logs only a SHA-256 hash + byte count.")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -103,12 +108,26 @@ func main() {
 		log.Printf("Elevation enabled: backend-issued elevation_required=true commands will run via sudo")
 	}
 
+	auditLog, err := audit.Open(*auditLogPath, *auditIncludeCmd)
+	if err != nil {
+		log.Fatalf("Failed to open audit log: %v", err)
+	}
+	defer auditLog.Close()
+	if *auditLogPath != "" {
+		// Operator-supplied path (--audit-log flag); %q neutralises any
+		// embedded newline/tab. gosec G706 flags this as taint, but the
+		// "attacker" here is whoever already configured the agent's CLI.
+		// #nosec G706 -- operator input, not network input.
+		log.Printf("Audit log enabled at %q (include_command=%v)", *auditLogPath, *auditIncludeCmd)
+	}
+
 	// Create session manager and WebSocket client.
 	mgr := session.NewManager(session.Config{
 		ScriptsDir:     scriptsDir,
 		MaxExec:        *maxExec,
 		MaxPty:         *maxPty,
 		AllowElevation: *allowElevation,
+		Audit:          auditLog,
 	})
 	client := connection.NewClient(cfg, state, mgr)
 
@@ -145,6 +164,7 @@ func envBool(key string, fallback bool) bool {
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
+		// #nosec G706 -- operator-supplied env var; %q neutralises escapes.
 		log.Printf("Warning: ignoring %s=%q: %v", key, v, err)
 		return fallback
 	}
@@ -158,6 +178,7 @@ func envInt(key string, fallback int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
+		// #nosec G706 -- operator-supplied env var; %q neutralises escapes.
 		log.Printf("Warning: ignoring %s=%q: must be a positive integer", key, v)
 		return fallback
 	}

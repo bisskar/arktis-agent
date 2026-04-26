@@ -21,11 +21,31 @@ In Arktis, go to **Org Settings > Lab Hosts > Registration Keys** and click **Ge
 
 ### 2. Install the Agent
 
+Every release ships with a `sha256sums.txt` checksum manifest and a
+keyless [cosign](https://docs.sigstore.dev/cosign/overview/) signature
+bundle. Verify before running.
+
 **Linux:**
 
 ```bash
-curl -sSL https://github.com/bisskar/arktis-agent/releases/latest/download/arktis-agent-linux-amd64 \
-  -o /usr/local/bin/arktis-agent && chmod +x /usr/local/bin/arktis-agent
+RELEASE_URL=https://github.com/bisskar/arktis-agent/releases/latest/download
+
+# 1. Download the binary, the checksum manifest, and its signature bundle.
+curl -sSL "${RELEASE_URL}/arktis-agent-linux-amd64"          -o arktis-agent
+curl -sSL "${RELEASE_URL}/sha256sums.txt"                    -o sha256sums.txt
+curl -sSL "${RELEASE_URL}/sha256sums.txt.cosign.bundle"      -o sha256sums.txt.cosign.bundle
+
+# 2. Verify the checksum manifest's signature against the GitHub-issued
+#    OIDC identity. Adjust the regex if you fork the repo.
+cosign verify-blob \
+  --bundle sha256sums.txt.cosign.bundle \
+  --certificate-identity-regexp '^https://github.com/bisskar/arktis-agent/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  sha256sums.txt
+
+# 3. Verify the binary against the signed manifest, then install.
+sha256sum -c --ignore-missing sha256sums.txt
+sudo install -m 0755 arktis-agent /usr/local/bin/arktis-agent
 
 arktis-agent --url wss://your-server.com/api/v1/agent/ws --key <YOUR_KEY>
 ```
@@ -33,9 +53,24 @@ arktis-agent --url wss://your-server.com/api/v1/agent/ws --key <YOUR_KEY>
 **Windows (PowerShell):**
 
 ```powershell
-Invoke-WebRequest -Uri "https://github.com/bisskar/arktis-agent/releases/latest/download/arktis-agent-windows-amd64.exe" `
-  -OutFile "$env:ProgramFiles\arktis-agent.exe"
+$ReleaseUrl = "https://github.com/bisskar/arktis-agent/releases/latest/download"
+Invoke-WebRequest -Uri "$ReleaseUrl/arktis-agent-windows-amd64.exe"             -OutFile "arktis-agent.exe"
+Invoke-WebRequest -Uri "$ReleaseUrl/sha256sums.txt"                             -OutFile "sha256sums.txt"
+Invoke-WebRequest -Uri "$ReleaseUrl/sha256sums.txt.cosign.bundle"               -OutFile "sha256sums.txt.cosign.bundle"
 
+# Verify checksum-manifest signature (requires cosign in PATH).
+cosign verify-blob `
+  --bundle sha256sums.txt.cosign.bundle `
+  --certificate-identity-regexp '^https://github.com/bisskar/arktis-agent/' `
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com `
+  sha256sums.txt
+
+# Verify the binary against the manifest.
+$expected = (Select-String -Path sha256sums.txt -Pattern 'arktis-agent-windows-amd64.exe').Line.Split(' ')[0]
+$actual   = (Get-FileHash arktis-agent.exe -Algorithm SHA256).Hash.ToLower()
+if ($expected -ne $actual) { throw "checksum mismatch" }
+
+Move-Item -Force arktis-agent.exe "$env:ProgramFiles\arktis-agent.exe"
 & "$env:ProgramFiles\arktis-agent.exe" --url wss://your-server.com/api/v1/agent/ws --key <YOUR_KEY>
 ```
 

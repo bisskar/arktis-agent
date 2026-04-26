@@ -31,6 +31,7 @@ func resolveLinuxShell() string {
 		if path, ok := validateShell(v); ok {
 			return path
 		}
+		// #nosec G706 -- $SHELL is operator-supplied env input, not network; %q quotes it.
 		log.Printf("Warning: $SHELL %q failed validation; falling back to shell allowlist", v)
 	}
 	for _, c := range linuxShellAllowlist {

@@ -59,13 +59,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run gosec
-        uses: securego/gosec@master
+      - uses: actions/setup-go@v5
         with:
-          # -fmt sarif emits results that GitHub code-scanning can consume.
-          # -no-fail keeps CI green if findings exist; gosec output is still
-          #  visible in the action log and uploaded as SARIF.
-          args: -fmt sarif -out gosec.sarif -no-fail -exclude-dir=.github ./...
+          go-version: 'stable'
+
+      # Running gosec via `go install` rather than the securego/gosec
+      # action keeps the no-fail behaviour consistent with what we see
+      # locally (the action wrapper has a habit of exiting non-zero
+      # despite `-no-fail`). Findings still go to GitHub code scanning
+      # via the SARIF upload below.
+      - name: Run gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -fmt sarif -out gosec.sarif -no-fail -exclude-dir=.github ./...
 
       - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v3

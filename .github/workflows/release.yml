@@ -29,7 +29,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: 'stable'
 
       - name: Build
         env:
@@ -48,10 +48,41 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write   # cosign keyless OIDC
     steps:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+
+      - name: Compute SHA-256 checksums
+        run: |
+          sha256sum \
+            arktis-agent-linux-amd64 \
+            arktis-agent-linux-arm64 \
+            arktis-agent-windows-amd64.exe \
+            > sha256sums.txt
+          cat sha256sums.txt
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign artifacts (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          for f in \
+            arktis-agent-linux-amd64 \
+            arktis-agent-linux-arm64 \
+            arktis-agent-windows-amd64.exe \
+            sha256sums.txt
+          do
+            cosign sign-blob \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.crt" \
+              --bundle "${f}.cosign.bundle" \
+              "${f}"
+          done
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -61,3 +92,16 @@ jobs:
             arktis-agent-linux-amd64
             arktis-agent-linux-arm64
             arktis-agent-windows-amd64.exe
+            sha256sums.txt
+            arktis-agent-linux-amd64.sig
+            arktis-agent-linux-amd64.crt
+            arktis-agent-linux-amd64.cosign.bundle
+            arktis-agent-linux-arm64.sig
+            arktis-agent-linux-arm64.crt
+            arktis-agent-linux-arm64.cosign.bundle
+            arktis-agent-windows-amd64.exe.sig
+            arktis-agent-windows-amd64.exe.crt
+            arktis-agent-windows-amd64.exe.cosign.bundle
+            sha256sums.txt.sig
+            sha256sums.txt.crt
+            sha256sums.txt.cosign.bundle
