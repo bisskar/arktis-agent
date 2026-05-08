@@ -20,7 +20,12 @@ jobs:
           # Match the latest stable minor so govulncheck sees a stdlib that
           # has the most recent advisories applied. go.mod still pins
           # `go 1.22` as the minimum supported toolchain.
-          go-version: 'stable'
+          # check-latest forces a fresh resolution on every run so a stale
+          # toolchain cache (e.g. setup-go cache hit on 1.26.2 after
+          # GO-2026-4971 was published and 1.26.3 fixed it) cannot keep
+          # CI red on a pre-existing stdlib advisory.
+          go-version: '1.26.3'
+          check-latest: true
 
       - name: Build (all platforms)
         run: make build-all
@@ -39,10 +44,9 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          # Match the latest stable minor so govulncheck sees a stdlib that
-          # has the most recent advisories applied. go.mod still pins
-          # `go 1.22` as the minimum supported toolchain.
-          go-version: 'stable'
+          # See build-and-test job for why check-latest is set.
+          go-version: '1.26.3'
+          check-latest: true
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -61,7 +65,9 @@ jobs:
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: 'stable'
+          # See build-and-test job for why check-latest is set.
+          go-version: '1.26.3'
+          check-latest: true
 
       # Running gosec via `go install` rather than the securego/gosec
       # action keeps the no-fail behaviour consistent with what we see
