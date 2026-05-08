@@ -160,9 +160,21 @@ func (c *Client) connect(ctx context.Context) error {
 		return fmt.Errorf("build tls config: %w", err)
 	}
 
+	// TCP keepalive defense for half-open connections. Windows defaults
+	// `KeepAliveTime` to 2 hours, so a silently-dropped session (NIC
+	// power-down, hypervisor pause, route flap) can leave WriteControl
+	// pings landing in the kernel send buffer with no TCP-level error
+	// for a very long time. A 30s keepalive idle gets the OS probing
+	// shortly after the application read deadline (`readTimeout`) would
+	// have triggered, providing belt-and-suspenders liveness.
+	netDialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:  tlsCfg,
+		NetDialContext:   netDialer.DialContext,
 	}
 	conn, _, err := dialer.DialContext(ctx, c.config.BackendURL, header)
 	if err != nil {
