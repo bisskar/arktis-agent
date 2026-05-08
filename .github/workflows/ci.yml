@@ -24,7 +24,7 @@ jobs:
           # toolchain cache (e.g. setup-go cache hit on 1.26.2 after
           # GO-2026-4971 was published and 1.26.3 fixed it) cannot keep
           # CI red on a pre-existing stdlib advisory.
-          go-version: 'stable'
+          go-version: '1.26.3'
           check-latest: true
 
       - name: Build (all platforms)
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # See build-and-test job for why check-latest is set.
-          go-version: 'stable'
+          go-version: '1.26.3'
           check-latest: true
 
       - name: Install govulncheck
@@ -66,7 +66,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           # See build-and-test job for why check-latest is set.
-          go-version: 'stable'
+          go-version: '1.26.3'
           check-latest: true
 
       # Running gosec via `go install` rather than the securego/gosec
