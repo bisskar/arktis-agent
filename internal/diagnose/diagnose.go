@@ -191,7 +191,9 @@ func tcpCheck(ctx context.Context, host, port string) (net.Conn, error) {
 func tlsCheck(ctx context.Context, host, port string, cfg *tls.Config, now time.Time) (string, error) {
 	dialCfg := cfg.Clone()
 	if dialCfg == nil {
-		dialCfg = &tls.Config{}
+		// MinVersion set inline so gosec G402 sees the floor on the
+		// composite literal rather than relying on the next-line patch.
+		dialCfg = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 	if dialCfg.ServerName == "" {
 		dialCfg.ServerName = host

@@ -95,7 +95,7 @@ type rotator struct {
 
 func openRotator(path string) (*rotator, error) {
 	// #nosec G304 -- path is operator-configurable via --log-file.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +160,7 @@ func (r *rotator) rotateLocked() error {
 	}
 
 	// #nosec G304 -- r.path is operator-configurable via --log-file.
-	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|os.O_TRUNC, 0o640)
+	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("reopen %s: %w", r.path, err)
 	}
