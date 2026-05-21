@@ -566,19 +566,27 @@ func writeJSON(conn *websocket.Conn, msg interface{}) error {
 
 // buildTLSConfig builds the *tls.Config the WebSocket dialer will use.
 //
+// Thin wrapper that defers to BuildTLSConfig so the same config can be
+// constructed from --diagnose (which doesn't have a *Client).
+func (c *Client) buildTLSConfig() (*tls.Config, error) {
+	return BuildTLSConfig(c.config.CACertPath, c.config.PinSPKI)
+}
+
+// BuildTLSConfig builds the *tls.Config the WebSocket dialer will use.
+//
 // Two operator-controlled defences-in-depth on top of system-CA trust:
-//   - --ca-cert: replaces the system root pool with a single PEM file,
+//   - caCertPath: replaces the system root pool with a single PEM file,
 //     so a malicious CA in /etc/ssl/certs cannot mint an impersonating
 //     cert for the backend.
-//   - --pin-spki: a hex SHA-256 of the leaf cert's SubjectPublicKeyInfo.
+//   - pinSPKI: a hex SHA-256 of the leaf cert's SubjectPublicKeyInfo.
 //     Any cert with a different public key is rejected even if it
 //     chains to a trusted root.
 //
-// Both are independent and may be combined. Returns nil if neither is
-// set, in which case gorilla/websocket falls back to its default TLS
+// Both are independent and may be combined. Returns (nil, nil) if neither
+// is set, in which case gorilla/websocket falls back to its default TLS
 // behaviour (system CAs, hostname verification).
-func (c *Client) buildTLSConfig() (*tls.Config, error) {
-	if c.config.CACertPath == "" && c.config.PinSPKI == "" {
+func BuildTLSConfig(caCertPath, pinSPKI string) (*tls.Config, error) {
+	if caCertPath == "" && pinSPKI == "" {
 		return nil, nil
 	}
 
@@ -586,24 +594,24 @@ func (c *Client) buildTLSConfig() (*tls.Config, error) {
 		MinVersion: tls.VersionTLS12,
 	}
 
-	if c.config.CACertPath != "" {
+	if caCertPath != "" {
 		// #nosec G304 -- path is the operator-supplied --ca-cert flag value.
-		pem, err := os.ReadFile(c.config.CACertPath)
+		pem, err := os.ReadFile(caCertPath)
 		if err != nil {
-			return nil, fmt.Errorf("read --ca-cert %s: %w", c.config.CACertPath, err)
+			return nil, fmt.Errorf("read --ca-cert %s: %w", caCertPath, err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("--ca-cert %s contained no usable PEM certificates", c.config.CACertPath)
+			return nil, fmt.Errorf("--ca-cert %s contained no usable PEM certificates", caCertPath)
 		}
 		cfg.RootCAs = pool
 	}
 
-	if c.config.PinSPKI != "" {
-		want := strings.ToLower(strings.TrimSpace(c.config.PinSPKI))
+	if pinSPKI != "" {
+		want := strings.ToLower(strings.TrimSpace(pinSPKI))
 		want = strings.TrimPrefix(want, "sha256:")
 		if _, err := hex.DecodeString(want); err != nil || len(want) != 64 {
-			return nil, fmt.Errorf("--pin-spki must be a 64-character hex SHA-256, got %q", c.config.PinSPKI)
+			return nil, fmt.Errorf("--pin-spki must be a 64-character hex SHA-256, got %q", pinSPKI)
 		}
 		cfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
