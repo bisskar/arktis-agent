@@ -239,7 +239,11 @@ backend.
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `--url` | `ARKTIS_URL` | (required) | Backend WebSocket URL. Must be `wss://` unless `--insecure` is set. |
+| `--url` | `ARKTIS_URL` | (required if `--host` not set) | Backend WebSocket URL. Must be `wss://` unless `--insecure` is set. |
+| `--host` | `ARKTIS_HOST` | `` | Backend hostname. When `--url` is not set, the agent synthesizes `wss://<host>:443/api/v1/agent/ws` (prod) — port 443 is the one outbound port corporate egress is guaranteed to allow. |
+| `--dev` | `ARKTIS_DEV` | `false` | Local-dev mode. With `--host`, synthesizes `ws://<host>:8000/api/v1/agent/ws` instead. Implies `--insecure`. |
+| `--diagnose` | — | `false` | Run DNS → TCP → TLS → WS upgrade → register/ack checks against the configured backend, print a per-step verdict, and exit. `exit 0` healthy / `exit 1` unhealthy — automatable. |
+| `--log-file` | `ARKTIS_LOG_FILE` | OS default (see below) | Path to the rotated agent log file. Pass `-` to disable file logging. Rotates at 5 MiB, keeps 5 files. |
 | `--key-file` | `ARKTIS_KEY_FILE` | `` | Path to a 0600-mode file containing the registration key. **Preferred over `--key`.** |
 | `--key` | `ARKTIS_KEY` | `` | Registration key. Reading via env var is fine; passing on argv (`--key`) is **deprecated** because the value leaks to `ps`/auditd. |
 | `--insecure` | `ARKTIS_INSECURE` | `false` | Allow plaintext `ws://` URLs. Logs a loud warning on every connect. Local development only. |
@@ -257,6 +261,55 @@ backend.
 | `--signing-pubkey-file` | `ARKTIS_SIGNING_PUBKEY_FILE` | `` | Path to a PEM-encoded Ed25519 public key. When set, every `exec`/`pty_open` is verified against `signature` + `signed_at` (±5 min skew). |
 | `--require-message-signature` | `ARKTIS_REQUIRE_MESSAGE_SIGNATURE` | `false` | Reject unsigned `exec`/`pty_open` messages. Requires `--signing-pubkey-file`. |
 | `--version` | — | — | Print version and exit |
+
+### Default log paths
+
+| OS      | Path                                              |
+|---------|---------------------------------------------------|
+| Windows | `%ProgramData%\arktis-agent\agent.log`            |
+| Linux   | `/var/log/arktis-agent/agent.log`                 |
+| macOS   | `/Library/Logs/arktis-agent/agent.log`            |
+
+Log lines are written to both this file and the agent's stderr, so
+`journalctl -u arktis-agent` and "tail the file" both work. The file
+rotates at 5 MiB and keeps 5 generations (`agent.log` plus
+`agent.log.1` … `agent.log.4`). Pass `--log-file -` to disable the
+on-disk copy entirely (`--diagnose` runs do this implicitly).
+
+## Diagnosing connection problems
+
+Onboarding the agent on a new host used to mean a 20-minute PowerShell
+safari running manual DNS / TCP / TLS / WebSocket / auth probes. The
+`--diagnose` subcommand walks the same five layers and prints a verdict:
+
+```bash
+arktis-agent --diagnose \
+  --host your-server.com \
+  --key-file /etc/arktis-agent/key
+```
+
+Output:
+
+```
+arktis-agent --diagnose  target=your-server.com  scheme=wss  port=443
+
+[ OK ]  DNS          your-server.com → 203.0.113.42
+[ OK ]  TCP          connected to 203.0.113.42:443 in IPv4
+[ OK ]  TLS          handshake OK
+[ OK ]  WS upgrade   101 Switching Protocols in 184ms
+[ OK ]  Auth         register/ack round-trip OK
+
+VERDICT: HEALTHY
+```
+
+Exit code is 0 on healthy, 1 on any failure (the final line names the
+failed step). The diagnose path respects `--ca-cert` and `--pin-spki`
+so the check exercises the same TLS config the live agent would use.
+
+If TCP fails: check the host's outbound firewall and any corporate
+egress proxy. Port 443 is the default precisely because corporate
+egress is guaranteed to allow it — if you're on a non-default port,
+expect more friction.
 
 ## Security Model
 

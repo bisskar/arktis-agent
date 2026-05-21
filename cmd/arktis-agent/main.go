@@ -15,12 +15,29 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bisskar/arktis-agent/internal/audit"
 	"github.com/bisskar/arktis-agent/internal/config"
 	"github.com/bisskar/arktis-agent/internal/connection"
+	"github.com/bisskar/arktis-agent/internal/diagnose"
+	"github.com/bisskar/arktis-agent/internal/logging"
 	"github.com/bisskar/arktis-agent/internal/session"
 )
+
+// Default WebSocket path appended to a --host value when --url is not
+// explicitly set. Mirrors the path the backend serves at.
+const defaultWSPath = "/api/v1/agent/ws"
+
+// devPort is the local-dev backend port the agent connects to when
+// --dev is set. Matches the FastAPI dev stack documented in
+// CLAUDE.md (`host.docker.internal:8000`).
+const devPort = "8000"
+
+// prodPort is the production WS port. 443 is the only outbound port
+// guaranteed available across corporate egress rules, so the agent
+// defaults to it when --host is given without an explicit --url.
+const prodPort = "443"
 
 // Version is set via ldflags at build time.
 var Version = "dev"
@@ -36,9 +53,36 @@ func defaultStateDir() string {
 	return "/etc/arktis-agent"
 }
 
+// synthesizeURL builds the WebSocket URL from --host when --url is empty.
+// Returns "" if --host is also empty (caller must surface the error).
+//
+//   - prod default (the line the issue calls out): wss://<host>:443/api/v1/agent/ws
+//   - --dev: ws://<host>:8000/api/v1/agent/ws — keeps the legacy local-stack shape
+//
+// 443 was chosen because it is the one outbound port corporate egress
+// is guaranteed to allow; the old 3000/8000 defaults forced operators
+// to ask for firewall changes on every customer install.
+func synthesizeURL(host string, dev bool) string {
+	if host == "" {
+		return ""
+	}
+	if dev {
+		return "ws://" + host + ":" + devPort + defaultWSPath
+	}
+	return "wss://" + host + ":" + prodPort + defaultWSPath
+}
+
 func main() {
 	urlFlag := flag.String("url", os.Getenv("ARKTIS_URL"),
-		"Backend WebSocket URL (required). Must be wss:// unless --insecure is set.")
+		"Backend WebSocket URL. Required unless --host (and optionally --dev) are set. Must be wss:// unless --insecure.")
+	hostFlag := flag.String("host", os.Getenv("ARKTIS_HOST"),
+		"Backend hostname. When --url is not set, the agent synthesizes wss://<host>:443/api/v1/agent/ws (prod) or ws://<host>:8000/api/v1/agent/ws (--dev).")
+	devMode := flag.Bool("dev", envBool("ARKTIS_DEV", false),
+		"Local-dev mode. With --host, defaults to ws://<host>:8000/api/v1/agent/ws instead of the prod 443/wss shape.")
+	diagnoseFlag := flag.Bool("diagnose", false,
+		"Run connectivity checks (DNS → TCP → TLS → WS upgrade → register/ack) against the configured backend, print a per-step verdict, and exit. Returns 0 on healthy, 1 on any failure.")
+	logFileFlag := flag.String("log-file", os.Getenv("ARKTIS_LOG_FILE"),
+		"Path to the rotated agent log file. Defaults to the OS-specific predictable path (Windows: %ProgramData%\\arktis-agent\\agent.log, Linux: /var/log/arktis-agent/agent.log, macOS: /Library/Logs/arktis-agent/agent.log). Pass '-' to skip file logging entirely.")
 	keyFlag := flag.String("key", "",
 		"DEPRECATED: registration key on argv. Visible to ps/auditd. Use --key-file or ARKTIS_KEY instead.")
 	keyFilePath := flag.String("key-file", os.Getenv("ARKTIS_KEY_FILE"),
@@ -79,9 +123,33 @@ func main() {
 	}
 
 	if *urlFlag == "" {
-		fmt.Fprintln(os.Stderr, "Error: --url (or ARKTIS_URL) is required")
+		// Synthesize from --host so production installs only need to
+		// provide the hostname. We pick port 443 / wss:// (or 8000 / ws://
+		// under --dev) so corporate egress works out of the box.
+		*urlFlag = synthesizeURL(*hostFlag, *devMode)
+	}
+	if *urlFlag == "" {
+		fmt.Fprintln(os.Stderr, "Error: --url (or ARKTIS_URL) is required, or pass --host so the agent can build the default URL")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	// Configure the rotated log destination before any other startup
+	// work so even early-startup errors land in the predictable file.
+	// `--log-file -` opts out; empty falls back to the OS default.
+	logPath := *logFileFlag
+	switch logPath {
+	case "-":
+		logPath = ""
+	case "":
+		logPath = logging.DefaultPath()
+	}
+	logCloser, err := logging.Setup(logPath, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "logging setup: %v\n", err)
+	}
+	if logCloser != nil {
+		defer func() { _ = logCloser.Close() }()
 	}
 
 	// Validate the backend URL scheme. wss:// is required unless the
@@ -92,13 +160,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("Invalid --url: %v", err)
 	}
+	// --dev is an explicit local-stack opt-in; treat it as equivalent
+	// to --insecure for the URL-scheme gate so operators don't have to
+	// remember both flags. The plaintext warning is still emitted so a
+	// production deploy that accidentally inherits ARKTIS_DEV=1 is
+	// loud about it.
+	allowWS := *insecure || *devMode
 	switch parsedURL.Scheme {
 	case "wss":
 		// fine
 	case "ws":
-		if !*insecure {
+		if !allowWS {
 			log.Fatalf("Refusing ws:// URL %q: TLS is required by default. "+
-				"Pass --insecure (or ARKTIS_INSECURE=1) only for local development.", *urlFlag)
+				"Pass --insecure (or --dev / ARKTIS_INSECURE=1 / ARKTIS_DEV=1) only for local development.", *urlFlag)
 		}
 		log.Println("WARNING: TLS DISABLED. ws:// is unencrypted; the registration key " +
 			"and every exec/PTY frame are visible on the wire. Use only for local dev.")
@@ -118,6 +192,31 @@ func main() {
 			"Switch to --key-file or ARKTIS_KEY (loaded from systemd EnvironmentFile).")
 	}
 	_ = os.Unsetenv("ARKTIS_KEY")
+
+	// --diagnose short-circuits before we open the audit log, write the
+	// state dir, or start the reconnect loop. It is a read-only probe:
+	// build the same TLS config the live agent would use, walk the five
+	// connection layers, print a verdict, and exit. Onboarding now takes
+	// one command instead of a 20-minute PowerShell safari.
+	if *diagnoseFlag {
+		tlsCfg, terr := connection.BuildTLSConfig(*caCertPath, *pinSPKI)
+		if terr != nil {
+			log.Fatalf("--diagnose: build tls config: %v", terr)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		res := diagnose.Run(ctx, diagnose.Options{
+			URL:       *urlFlag,
+			Key:       resolvedKey,
+			TLSConfig: tlsCfg,
+			Insecure:  allowWS,
+			Out:       os.Stdout,
+		})
+		if !res.Healthy {
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg := &config.Config{
 		BackendURL:     *urlFlag,
