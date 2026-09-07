@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "orch": {
+      "source": {
+        "source": "github",
+        "repo": "bisskar/ai_orchestrator"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "reviewer@orch": true
+  }
+}
