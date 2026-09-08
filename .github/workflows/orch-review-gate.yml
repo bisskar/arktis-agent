@@ -1,4 +1,4 @@
-# rendered by orch from projects/arktis-agent.yaml (render d111235434d1); do not edit, change the manifest and re-run orch render
+# rendered by orch from projects/arktis-agent.yaml (render abf844c533f2); do not edit, change the manifest and re-run orch render
 #
 # The CI mirror of the merge gate. The decision is lib/gate-query.ts in the
 # marketplace, the same call the merge hook makes; this job publishes it as a
@@ -58,7 +58,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: bisskar/ai_orchestrator
-          ref: 54216aa1623b86218dd5ce66639b048be8187cef # plugins/gate@0.2.5, the release this repo installs; tags are never moved, commits cannot be
+          ref: 0592947139c8933713e9cd0f60693b8aa925a382 # plugins/gate@0.2.6, the release this repo installs; tags are never moved, commits cannot be
           path: .orch
           token: ${{ secrets.ORCH_TOKEN }}
           persist-credentials: false

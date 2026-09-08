@@ -49,4 +49,8 @@ codex plugin marketplace add bisskar/ai_orchestrator
 codex plugin add core@orch
 ```
 Codex loads every enabled plugin in every repository and runs plugin hooks only after hook trust is granted in the TUI; the ORCH_* values a hook needs come from `.claude/orch.json` here (`orch codex-sync` writes the machine-local config; `orch doctor` checks it).
+
+### Commands in Codex
+The `/core:<name>` form above is Claude Code's. Codex converts each command into a skill named `source-command-<name>`, so ask for the command by name instead: "run review-local", "run create-pr". The procedure is identical; only the way you reach it differs.
+A command Codex has not converted is not available here at all, and Codex says nothing about it. `orch doctor` checks every plugin's commands against the three rules that make Codex skip one silently: a rendered skill over 4,000 bytes, an unsupported template token (`$ARGUMENTS`, `$1`, `{{ }}`, an inline shell substitution, an `@token`), or a missing frontmatter description.
 <!-- orch:end -->
