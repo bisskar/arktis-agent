@@ -457,3 +457,5 @@ git push origin v0.2.0                 # re-trigger release.yml
 ## License
 
 Private. Part of the Arktis platform.
+
+<!-- gate proof: throwaway, not for merge -->
