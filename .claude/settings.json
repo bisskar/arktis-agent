@@ -30,14 +30,11 @@
     "ORCH_CI_WAIT_CAP_MINUTES": "30",
     "ORCH_REPO": "bisskar/arktis-agent",
     "ORCH_BRANCH_PATTERN": "^(feature|fix|chore)/",
-    "ORCH_RENDER": "d111235434d1"
+    "ORCH_RENDER": "abf844c533f2"
   },
   "enabledPlugins": {
     "core@orch": true,
-    "gate@orch": true,
-    "reviewer@orch": false,
-    "worktrees@orch": false,
-    "issue-tagging@orch": false
+    "gate@orch": true
   },
   "extraKnownMarketplaces": {
     "orch": {
