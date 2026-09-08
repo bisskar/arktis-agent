@@ -1,4 +1,44 @@
 {
+  "env": {
+    "ORCH_VERSION": "1",
+    "ORCH_PROJECT": "arktis-agent",
+    "ORCH_INTEGRATION_BRANCH": "main",
+    "ORCH_WORKTREE_ROOT": "arktis-agent-worktrees",
+    "ORCH_INSTALL_CMD": "go mod download",
+    "ORCH_AREA_LABELS": "executor|connection|protocol|terminal|audit|config|diagnose|logging|ci|docs",
+    "ORCH_REVIEW_LOGINS": "bisskar",
+    "ORCH_REVIEW_LENSES": "correctness,security",
+    "ORCH_CONNECTOR": "off",
+    "ORCH_GATE": "required",
+    "ORCH_FINDINGS_OWNER": "session",
+    "ORCH_REVIEW_FALLBACK": "none",
+    "ORCH_REVIEW_FALLBACK_MINUTES": "10",
+    "ORCH_DEV_DEPLOY": "none",
+    "ORCH_PROD_WORKFLOWS": "",
+    "ORCH_DEPLOY_STEPS": "",
+    "ORCH_MERGE_FLAGS": "--merge",
+    "ORCH_CONFLICT_STRATEGY": "merge",
+    "ORCH_COMMIT_CONVENTION": "free",
+    "ORCH_ISSUE_BODY": "brief",
+    "ORCH_ISSUE_NAMED_BENEFICIARY": "0",
+    "ORCH_PLAN_FILE": "",
+    "ORCH_MERGE_WHEN_READY": "1",
+    "ORCH_LANG": "en",
+    "ORCH_CI_POLL_SECONDS": "45",
+    "ORCH_CI_MAX_ATTEMPTS": "6",
+    "ORCH_CI_OSCILLATION_N": "3",
+    "ORCH_CI_WAIT_CAP_MINUTES": "30",
+    "ORCH_REPO": "bisskar/arktis-agent",
+    "ORCH_BRANCH_PATTERN": "^(feature|fix|chore)/",
+    "ORCH_RENDER": "d111235434d1"
+  },
+  "enabledPlugins": {
+    "core@orch": true,
+    "gate@orch": true,
+    "reviewer@orch": false,
+    "worktrees@orch": false,
+    "issue-tagging@orch": false
+  },
   "extraKnownMarketplaces": {
     "orch": {
       "source": {
@@ -6,8 +46,5 @@
         "repo": "bisskar/ai_orchestrator"
       }
     }
-  },
-  "enabledPlugins": {
-    "reviewer@orch": true
   }
 }

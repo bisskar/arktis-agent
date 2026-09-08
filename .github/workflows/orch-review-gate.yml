@@ -1,0 +1,75 @@
+# rendered by orch from projects/arktis-agent.yaml (render d111235434d1); do not edit, change the manifest and re-run orch render
+#
+# The CI mirror of the merge gate. The decision is lib/gate-query.ts in the
+# marketplace, the same call the merge hook makes; this job publishes it as a
+# `review-gate` commit status and a `gate:<verdict>` label. It never waits:
+# the next comment (review markers arrive as comments) or push re-runs it.
+#
+# Trust boundary. Every trigger here runs a TRUSTED copy of this file:
+# `pull_request_target` runs the base branch's copy, `issue_comment` and
+# `schedule` run the default branch's. The checkout below is the base
+# revision, never the pull request: the contract (.claude/orch.json: review
+# logins, lenses) that decides who may review is read from the base, and
+# the pull request is evaluated only through the API. A pull request cannot
+# add its author to the reviewers, edit this workflow, or run a step of its
+# own here, and no pull-request code is checked out on any trigger, so the
+# runner (self-hosted included) never executes it.
+#
+# Deliberately absent: `pull_request`, `pull_request_review`,
+# `pull_request_review_comment` and `workflow_dispatch`. Those run the
+# workflow definition from the pull request's own branch (or a chosen ref)
+# with this job's secrets, which is how a same-repository pull request could
+# forge a green review-gate status. Review markers arrive as issue comments;
+# a native review or a resolved thread is picked up by the next comment,
+# push, or the sweep.
+#
+# Requires the ORCH_TOKEN secret: a fine-grained PAT with read access to the
+# marketplace repository.
+name: review-gate
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: '17 */2 * * *'
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number || github.event.issue.number || 'sweep' }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  checks: read
+  actions: read
+  pull-requests: write
+  issues: write
+  statuses: write
+jobs:
+  review-gate:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Base revision (the contract that names the trusted reviewers)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - name: Central config (the gate lives in the marketplace)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: bisskar/ai_orchestrator
+          ref: 54216aa1623b86218dd5ce66639b048be8187cef # plugins/gate@0.2.5, the release this repo installs; tags are never moved, commits cannot be
+          path: .orch
+          token: ${{ secrets.ORCH_TOKEN }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - name: Evaluate and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -eu
+          case "$PR" in
+            ''|*[!0-9]*) [ -z "$PR" ] || { echo "pr must be a number, got: $PR" >&2; exit 1; } ;;
+          esac
+          bun .orch/lib/gate-ci.ts $PR

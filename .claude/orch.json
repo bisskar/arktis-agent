@@ -1,0 +1,49 @@
+{
+  "orch_version": 1,
+  "project": "arktis-agent",
+  "repo": "bisskar/arktis-agent",
+  "integration_branch": "main",
+  "branch_pattern": "^(feature|fix|chore)/",
+  "worktree_root": "arktis-agent-worktrees",
+  "install_cmd": "go mod download",
+  "area_labels": [
+    "executor",
+    "connection",
+    "protocol",
+    "terminal",
+    "audit",
+    "config",
+    "diagnose",
+    "logging",
+    "ci",
+    "docs"
+  ],
+  "review_logins": [
+    "bisskar"
+  ],
+  "review_lenses": [
+    "correctness",
+    "security"
+  ],
+  "connector": "off",
+  "gate": "required",
+  "findings_owner": "session",
+  "review_fallback": "none",
+  "review_fallback_minutes": 10,
+  "dev_deploy": "none",
+  "prod_workflows": [],
+  "deploy_steps": [],
+  "merge_flags": "--merge",
+  "conflict_strategy": "merge",
+  "commit_convention": "free",
+  "issue_body": "brief",
+  "issue_named_beneficiary": false,
+  "plan_file": "",
+  "merge_when_ready": true,
+  "lang": "en",
+  "ci_poll_seconds": 45,
+  "ci_max_attempts": 6,
+  "ci_oscillation_n": 3,
+  "ci_wait_cap_minutes": 30,
+  "render_hash": "d111235434d1"
+}
