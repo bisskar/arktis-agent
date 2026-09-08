@@ -1,7 +1,7 @@
 # arktis-agent: instructions for Codex
 
 <!-- orch:begin -->
-<!-- rendered by orch from projects/arktis-agent.yaml (render d111235434d1); do not edit inside the markers, change the manifest and re-run orch render -->
+<!-- rendered by orch from projects/arktis-agent.yaml (render abf844c533f2); do not edit inside the markers, change the manifest and re-run orch render -->
 ## How work moves in arktis-agent
 
 Another agent session is always already running in this repository. The full doctrine is in the `core:*` skills; this is the part every session holds from the first prompt.
@@ -45,7 +45,7 @@ do not create or push tags. Nothing here deploys to a live system.
 
 ### Codex setup (once per machine)
 ```bash
-codex plugin marketplace add <path-to-or-url-of>/ai_orchestrator
+codex plugin marketplace add bisskar/ai_orchestrator
 codex plugin add core@orch
 ```
 Codex loads every enabled plugin in every repository and runs plugin hooks only after hook trust is granted in the TUI; the ORCH_* values a hook needs come from `.claude/orch.json` here (`orch codex-sync` writes the machine-local config; `orch doctor` checks it).
