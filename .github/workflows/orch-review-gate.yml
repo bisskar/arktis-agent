@@ -58,7 +58,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: bisskar/ai_orchestrator
-          ref: 2391ce6f36f212bbd441d30fa0989e1f1076b08f # plugins/gate@0.2.7, the release this repo installs; tags are never moved, commits cannot be
+          ref: 4c778ce3ab6ee7bf0329d609617281dabb3dd907 # plugins/gate@0.2.8, the release this repo installs; tags are never moved, commits cannot be
           path: .orch
           token: ${{ secrets.ORCH_TOKEN }}
           persist-credentials: false
