@@ -25,6 +25,7 @@
     "correctness",
     "security"
   ],
+  "review_guidelines": [],
   "connector": "off",
   "gate": "required",
   "findings_owner": "session",
@@ -33,6 +34,10 @@
   "dev_deploy": "none",
   "prod_workflows": [],
   "deploy_steps": [],
+  "dev_workflows": [],
+  "required_checks": [
+    "build-and-test"
+  ],
   "merge_flags": "--merge",
   "conflict_strategy": "merge",
   "commit_convention": "free",
@@ -45,5 +50,5 @@
   "ci_max_attempts": 6,
   "ci_oscillation_n": 3,
   "ci_wait_cap_minutes": 30,
-  "render_hash": "d111235434d1"
+  "render_hash": "152066db1330"
 }
