@@ -36,7 +36,10 @@
   "deploy_steps": [],
   "dev_workflows": [],
   "required_checks": [
-    "build-and-test"
+    "build-and-test",
+    "govulncheck",
+    "gosec",
+    "dependency-review"
   ],
   "merge_flags": "--merge",
   "conflict_strategy": "merge",
@@ -50,5 +53,5 @@
   "ci_max_attempts": 6,
   "ci_oscillation_n": 3,
   "ci_wait_cap_minutes": 30,
-  "render_hash": "152066db1330"
+  "render_hash": "a96e7f91bcb8"
 }

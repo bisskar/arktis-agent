@@ -18,7 +18,7 @@
     "ORCH_PROD_WORKFLOWS": "",
     "ORCH_DEPLOY_STEPS": "",
     "ORCH_DEV_WORKFLOWS": "",
-    "ORCH_REQUIRED_CHECKS": "build-and-test",
+    "ORCH_REQUIRED_CHECKS": "build-and-test|govulncheck|gosec|dependency-review",
     "ORCH_MERGE_FLAGS": "--merge",
     "ORCH_CONFLICT_STRATEGY": "merge",
     "ORCH_COMMIT_CONVENTION": "free",
@@ -33,7 +33,7 @@
     "ORCH_CI_WAIT_CAP_MINUTES": "30",
     "ORCH_REPO": "bisskar/arktis-agent",
     "ORCH_BRANCH_PATTERN": "^(feature|fix|chore)/",
-    "ORCH_RENDER": "152066db1330"
+    "ORCH_RENDER": "a96e7f91bcb8"
   },
   "enabledPlugins": {
     "core@orch": true,
