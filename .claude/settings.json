@@ -8,6 +8,7 @@
     "ORCH_AREA_LABELS": "executor|connection|protocol|terminal|audit|config|diagnose|logging|ci|docs",
     "ORCH_REVIEW_LOGINS": "bisskar",
     "ORCH_REVIEW_LENSES": "correctness,security",
+    "ORCH_REVIEW_GUIDELINES": "[]",
     "ORCH_CONNECTOR": "off",
     "ORCH_GATE": "required",
     "ORCH_FINDINGS_OWNER": "session",
@@ -16,6 +17,8 @@
     "ORCH_DEV_DEPLOY": "none",
     "ORCH_PROD_WORKFLOWS": "",
     "ORCH_DEPLOY_STEPS": "",
+    "ORCH_DEV_WORKFLOWS": "",
+    "ORCH_REQUIRED_CHECKS": "build-and-test",
     "ORCH_MERGE_FLAGS": "--merge",
     "ORCH_CONFLICT_STRATEGY": "merge",
     "ORCH_COMMIT_CONVENTION": "free",
@@ -30,7 +33,7 @@
     "ORCH_CI_WAIT_CAP_MINUTES": "30",
     "ORCH_REPO": "bisskar/arktis-agent",
     "ORCH_BRANCH_PATTERN": "^(feature|fix|chore)/",
-    "ORCH_RENDER": "abf844c533f2"
+    "ORCH_RENDER": "152066db1330"
   },
   "enabledPlugins": {
     "core@orch": true,
