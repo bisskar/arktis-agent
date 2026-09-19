@@ -45,21 +45,34 @@ func LoadState(dir string) (*State, error) {
 }
 
 // SaveState writes the state to state.json in the given directory. It resets
-// the mode on every write because State may contain the host adoption proof.
+// platform access controls on every write because State may contain the host
+// adoption proof.
 func SaveState(dir string, state *State) error {
+	if err := protectStateDir(dir); err != nil {
+		return fmt.Errorf("protect state directory: %w", err)
+	}
+
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 
 	path := filepath.Join(dir, stateFileName)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("open state file: %w", err)
 	}
-	if err := file.Chmod(0o600); err != nil {
+	if err := protectStateFile(file); err != nil {
 		_ = file.Close()
-		return fmt.Errorf("set state file permissions: %w", err)
+		return fmt.Errorf("protect state file: %w", err)
+	}
+	if err := file.Truncate(0); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("truncate state file: %w", err)
+	}
+	if _, err := file.Seek(0, 0); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("rewind state file: %w", err)
 	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()

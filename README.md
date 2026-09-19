@@ -263,7 +263,8 @@ backend.
 | `--version` | — | — | Print version and exit |
 
 `state.json` can contain the backend-issued host adoption proof as well as the
-host ID. The agent writes the file with mode `0600` on Unix; protect the state
+host ID. The agent writes the file with mode `0600` on Unix and a protected
+SYSTEM/Administrators/service-identity DACL on Windows; protect the state
 directory and do not copy the file to another host.
 
 ### Default log paths

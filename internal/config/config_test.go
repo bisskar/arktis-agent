@@ -13,6 +13,9 @@ func TestSaveStateProtectsExistingFile(t *testing.T) {
 	}
 
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("seed state directory mode: %v", err)
+	}
 	path := filepath.Join(dir, stateFileName)
 	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
 		t.Fatalf("seed state file: %v", err)
@@ -29,6 +32,13 @@ func TestSaveStateProtectsExistingFile(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("state file mode = %#o, want 0600", got)
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat state directory: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("state directory mode = %#o, want 0700", got)
 	}
 
 	got, err := LoadState(dir)
