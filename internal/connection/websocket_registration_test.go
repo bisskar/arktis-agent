@@ -38,6 +38,9 @@ func TestConnectPersistsIssuedHostProof(t *testing.T) {
 	}
 
 	registration := <-registrations
+	if !registration.HostProofCapable {
+		t.Fatal("first registration did not advertise host_proof_capable")
+	}
 	if registration.HostProof != "" {
 		t.Fatalf("first registration host_proof = %q, want empty", registration.HostProof)
 	}
@@ -107,6 +110,9 @@ func TestConnectReturnsStoredHostProof(t *testing.T) {
 	}
 
 	registration := <-registrations
+	if !registration.HostProofCapable {
+		t.Fatal("reconnect did not advertise host_proof_capable")
+	}
 	if registration.HostID != "host-1" || registration.HostProof != "proof-1" {
 		t.Fatalf("registration = %#v, want stored host ID and proof", registration)
 	}

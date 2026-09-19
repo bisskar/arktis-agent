@@ -281,13 +281,14 @@ func wsCheck(ctx context.Context, wsURL string, tlsCfg *tls.Config) (*websocket.
 func authCheck(conn *websocket.Conn, key string) error {
 	hostname, _ := os.Hostname()
 	reg := protocol.RegisterMessage{
-		Type:         "register",
-		HostID:       "",
-		Hostname:     hostname,
-		Platform:     executor.DetectPlatform(),
-		OsFamily:     executor.DetectOsFamily(),
-		OsVersion:    executor.DetectOsVersion(),
-		AgentVersion: "diagnose",
+		Type:             "register",
+		HostID:           "",
+		HostProofCapable: true,
+		Hostname:         hostname,
+		Platform:         executor.DetectPlatform(),
+		OsFamily:         executor.DetectOsFamily(),
+		OsVersion:        executor.DetectOsVersion(),
+		AgentVersion:     "diagnose",
 	}
 	// The agent sets the bearer header on the HTTP upgrade. We don't get
 	// to peek at the upgrade headers from gorilla's API after the dial,

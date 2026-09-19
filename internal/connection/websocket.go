@@ -216,14 +216,15 @@ func (c *Client) connect(ctx context.Context) error {
 	// and switch all Send calls to non-blocking enqueue.
 	hostname, _ := os.Hostname()
 	reg := protocol.RegisterMessage{
-		Type:         "register",
-		HostID:       c.state.HostID,
-		HostProof:    c.state.HostProof,
-		Hostname:     hostname,
-		Platform:     executor.DetectPlatform(),
-		OsFamily:     executor.DetectOsFamily(),
-		OsVersion:    executor.DetectOsVersion(),
-		AgentVersion: getVersion(),
+		Type:             "register",
+		HostID:           c.state.HostID,
+		HostProof:        c.state.HostProof,
+		HostProofCapable: true,
+		Hostname:         hostname,
+		Platform:         executor.DetectPlatform(),
+		OsFamily:         executor.DetectOsFamily(),
+		OsVersion:        executor.DetectOsVersion(),
+		AgentVersion:     getVersion(),
 	}
 	if err := writeJSON(conn, reg); err != nil {
 		c.closeConn()

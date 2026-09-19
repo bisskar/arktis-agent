@@ -13,14 +13,15 @@ package protocol
 
 // RegisterMessage is sent on every WebSocket connect to identify the agent.
 type RegisterMessage struct {
-	Type         string `json:"type"`                 // "register"
-	HostID       string `json:"host_id,omitempty"`    // empty on first connect
-	HostProof    string `json:"host_proof,omitempty"` // opaque proof of host identity continuity
-	Hostname     string `json:"hostname"`
-	Platform     string `json:"platform"` // "windows" or "linux"
-	OsFamily     string `json:"os_family"`
-	OsVersion    string `json:"os_version"`
-	AgentVersion string `json:"agent_version"`
+	Type             string `json:"type"`                 // "register"
+	HostID           string `json:"host_id,omitempty"`    // empty on first connect
+	HostProof        string `json:"host_proof,omitempty"` // opaque proof of host identity continuity
+	HostProofCapable bool   `json:"host_proof_capable"`   // upgraded agent can persist and return HostProof
+	Hostname         string `json:"hostname"`
+	Platform         string `json:"platform"` // "windows" or "linux"
+	OsFamily         string `json:"os_family"`
+	OsVersion        string `json:"os_version"`
+	AgentVersion     string `json:"agent_version"`
 }
 
 // HeartbeatMessage keeps the connection alive.
