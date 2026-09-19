@@ -218,6 +218,7 @@ func (c *Client) connect(ctx context.Context) error {
 	reg := protocol.RegisterMessage{
 		Type:         "register",
 		HostID:       c.state.HostID,
+		HostProof:    c.state.HostProof,
 		Hostname:     hostname,
 		Platform:     executor.DetectPlatform(),
 		OsFamily:     executor.DetectOsFamily(),
@@ -271,6 +272,7 @@ func (c *Client) connect(ctx context.Context) error {
 	switch {
 	case c.state.HostID == "":
 		c.state.HostID = ack.HostID
+		c.state.HostProof = ack.HostProof
 		c.state.RegisteredAt = time.Now().UTC().Format(time.RFC3339)
 		if err := config.SaveState(c.config.StateDir, c.state); err != nil {
 			log.Printf("Warning: failed to save state: %v", err)
@@ -283,10 +285,22 @@ func (c *Client) connect(ctx context.Context) error {
 		log.Printf("Warning: backend changed host_id from %s to %s; updating state",
 			c.state.HostID, ack.HostID)
 		c.state.HostID = ack.HostID
+		// A proof is scoped to exactly one host. Never carry the old
+		// host's proof across a backend reassignment.
+		c.state.HostProof = ack.HostProof
 		c.state.RegisteredAt = time.Now().UTC().Format(time.RFC3339)
 		if err := config.SaveState(c.config.StateDir, c.state); err != nil {
 			log.Printf("Warning: failed to save state: %v", err)
 		}
+	case ack.HostProof != "" && ack.HostProof != c.state.HostProof:
+		// This supports the backend adding a proof to an existing host
+		// during rollout without changing its stable host_id. Empty proof
+		// fields remain backward-compatible and do not erase a stored proof.
+		c.state.HostProof = ack.HostProof
+		if err := config.SaveState(c.config.StateDir, c.state); err != nil {
+			log.Printf("Warning: failed to save host proof: %v", err)
+		}
+		log.Printf("Re-connected with host_id=%s", c.state.HostID)
 	default:
 		log.Printf("Re-connected with host_id=%s", c.state.HostID)
 	}

@@ -20,6 +20,7 @@ type Config struct {
 // State holds persistent agent state across restarts.
 type State struct {
 	HostID        string `json:"host_id"`
+	HostProof     string `json:"host_proof,omitempty"` // secret issued by the backend for this HostID
 	RegisteredAt  string `json:"registered_at"`
 	LastBackendIP string `json:"last_backend_ip,omitempty"`
 }
@@ -43,7 +44,8 @@ func LoadState(dir string) (*State, error) {
 	return &s, nil
 }
 
-// SaveState writes the state to state.json in the given directory.
+// SaveState writes the state to state.json in the given directory. It resets
+// the mode on every write because State may contain the host adoption proof.
 func SaveState(dir string, state *State) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -51,8 +53,20 @@ func SaveState(dir string, state *State) error {
 	}
 
 	path := filepath.Join(dir, stateFileName)
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open state file: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("set state file permissions: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
 		return fmt.Errorf("write state file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close state file: %w", err)
 	}
 
 	return nil

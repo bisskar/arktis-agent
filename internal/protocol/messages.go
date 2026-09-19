@@ -13,8 +13,9 @@ package protocol
 
 // RegisterMessage is sent on every WebSocket connect to identify the agent.
 type RegisterMessage struct {
-	Type         string `json:"type"`              // "register"
-	HostID       string `json:"host_id,omitempty"` // empty on first connect
+	Type         string `json:"type"`                 // "register"
+	HostID       string `json:"host_id,omitempty"`    // empty on first connect
+	HostProof    string `json:"host_proof,omitempty"` // opaque proof of host identity continuity
 	Hostname     string `json:"hostname"`
 	Platform     string `json:"platform"` // "windows" or "linux"
 	OsFamily     string `json:"os_family"`
@@ -67,8 +68,9 @@ type PtyClosedMessage struct {
 
 // AckMessage confirms registration and assigns a host_id.
 type AckMessage struct {
-	Type   string `json:"type"` // "ack"
-	HostID string `json:"host_id"`
+	Type      string `json:"type"` // "ack"
+	HostID    string `json:"host_id"`
+	HostProof string `json:"host_proof,omitempty"` // issued on enrolment; stored only by the agent
 }
 
 // ExecMessage requests command execution on the host.
