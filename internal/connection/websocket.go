@@ -150,6 +150,12 @@ func (c *Client) Run(ctx context.Context) error {
 
 // connect performs a single connection attempt: dial, register, read loop.
 func (c *Client) connect(ctx context.Context) error {
+	// Prove protected state is writable before claiming proof support. This also
+	// persists a proof retained after a failed acknowledgement save before we
+	// echo it: the backend may discard its recovery copy upon receiving that echo.
+	if err := config.SaveState(c.config.StateDir, c.state); err != nil {
+		return fmt.Errorf("persist state before registration: %w", err)
+	}
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+c.config.Key)
 
@@ -275,11 +281,6 @@ func (c *Client) connect(ctx context.Context) error {
 		c.state.HostID = ack.HostID
 		c.state.HostProof = ack.HostProof
 		c.state.RegisteredAt = time.Now().UTC().Format(time.RFC3339)
-		if err := config.SaveState(c.config.StateDir, c.state); err != nil {
-			log.Printf("Warning: failed to save state: %v", err)
-		} else {
-			log.Printf("Registered with host_id=%s", ack.HostID)
-		}
 	case ack.HostID != c.state.HostID:
 		// Backend reassigned us — surface this prominently so an operator
 		// can spot a rename / re-enrollment instead of silently rotating.
@@ -290,21 +291,19 @@ func (c *Client) connect(ctx context.Context) error {
 		// host's proof across a backend reassignment.
 		c.state.HostProof = ack.HostProof
 		c.state.RegisteredAt = time.Now().UTC().Format(time.RFC3339)
-		if err := config.SaveState(c.config.StateDir, c.state); err != nil {
-			log.Printf("Warning: failed to save state: %v", err)
-		}
 	case ack.HostProof != "" && ack.HostProof != c.state.HostProof:
 		// This supports the backend adding a proof to an existing host
 		// during rollout without changing its stable host_id. Empty proof
 		// fields remain backward-compatible and do not erase a stored proof.
 		c.state.HostProof = ack.HostProof
-		if err := config.SaveState(c.config.StateDir, c.state); err != nil {
-			log.Printf("Warning: failed to save host proof: %v", err)
-		}
-		log.Printf("Re-connected with host_id=%s", c.state.HostID)
-	default:
-		log.Printf("Re-connected with host_id=%s", c.state.HostID)
 	}
+	if err := config.SaveState(c.config.StateDir, c.state); err != nil {
+		// Retain the acknowledged identity in memory for the preflight save on
+		// retry, but do not accept commands until that identity is durable.
+		c.closeConn()
+		return fmt.Errorf("persist registration state: %w", err)
+	}
+	log.Printf("Registered with host_id=%s", c.state.HostID)
 
 	// Cap inbound frame size and install pong-driven read deadlines (#4).
 	// SetReadLimit must come before the post-ack message stream; otherwise
