@@ -19,7 +19,7 @@ func protectStateFile(file *os.File) error {
 	return setProtectedDACL(file.Name(), acl)
 }
 
-// protectStateDir runs before state.json is opened. The inheritable protected
+// protectStateDir runs before the temporary state file is created. The protected
 // DACL ensures a newly-created file is private from its first handle, closing
 // the create-then-restrict race that would otherwise expose the proof.
 func protectStateDir(dir string) error {

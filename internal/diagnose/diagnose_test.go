@@ -13,7 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func TestAuthCheckAdvertisesHostProofCapability(t *testing.T) {
+func TestAuthCheckDoesNotAdvertiseHostProofCapability(t *testing.T) {
 	registrations := make(chan protocol.RegisterMessage, 1)
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,8 +48,8 @@ func TestAuthCheckAdvertisesHostProofCapability(t *testing.T) {
 	if err := authCheck(conn, "registration-key"); err != nil {
 		t.Fatalf("authCheck: %v", err)
 	}
-	if registration := <-registrations; !registration.HostProofCapable {
-		t.Fatal("diagnostic registration did not advertise host_proof_capable")
+	if registration := <-registrations; registration.HostProofCapable {
+		t.Fatal("diagnostic registration advertised proof support without persistent state")
 	}
 }
 
