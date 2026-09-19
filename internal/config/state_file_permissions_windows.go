@@ -8,6 +8,20 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func replaceStateFile(oldPath, newPath string) error {
+	oldName, err := windows.UTF16PtrFromString(oldPath)
+	if err != nil {
+		return err
+	}
+	newName, err := windows.UTF16PtrFromString(newPath)
+	if err != nil {
+		return err
+	}
+	// Wait for the replacement to reach disk before permitting a proof echo.
+	// https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-movefileexw
+	return windows.MoveFileEx(oldName, newName, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
 // protectStateFile replaces inherited permissions before SaveState writes any
 // bytes. ProgramData commonly grants read access beyond the service identity;
 // a Unix-style 0600 mode does not narrow that ACL on Windows.

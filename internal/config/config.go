@@ -76,7 +76,7 @@ func SaveState(dir string, state *State) error {
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close state file: %w", err)
 	}
-	if err := os.Rename(file.Name(), filepath.Join(dir, stateFileName)); err != nil {
+	if err := replaceStateFile(file.Name(), filepath.Join(dir, stateFileName)); err != nil {
 		return fmt.Errorf("replace state file: %w", err)
 	}
 
