@@ -280,6 +280,7 @@ func wsCheck(ctx context.Context, wsURL string, tlsCfg *tls.Config) (*websocket.
 
 func authCheck(conn *websocket.Conn, key string) error {
 	hostname, _ := os.Hostname()
+	// Diagnostics do not persist identity or proof, so cannot advertise proof support.
 	reg := protocol.RegisterMessage{
 		Type:         "register",
 		HostID:       "",

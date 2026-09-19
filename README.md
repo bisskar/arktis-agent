@@ -262,6 +262,11 @@ backend.
 | `--require-message-signature` | `ARKTIS_REQUIRE_MESSAGE_SIGNATURE` | `false` | Reject unsigned `exec`/`pty_open` messages. Requires `--signing-pubkey-file`. |
 | `--version` | — | — | Print version and exit |
 
+`state.json` can contain the backend-issued host adoption proof as well as the
+host ID. The agent writes the file with mode `0600` on Unix and a protected
+SYSTEM/Administrators/service-identity DACL on Windows; protect the state
+directory and do not copy the file to another host.
+
 ### Default log paths
 
 | OS      | Path                                              |

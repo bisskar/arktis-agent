@@ -20,6 +20,7 @@ type Config struct {
 // State holds persistent agent state across restarts.
 type State struct {
 	HostID        string `json:"host_id"`
+	HostProof     string `json:"host_proof,omitempty"` // secret issued by the backend for this HostID
 	RegisteredAt  string `json:"registered_at"`
 	LastBackendIP string `json:"last_backend_ip,omitempty"`
 }
@@ -43,16 +44,40 @@ func LoadState(dir string) (*State, error) {
 	return &s, nil
 }
 
-// SaveState writes the state to state.json in the given directory.
+// SaveState replaces state.json with a protected new file. Readers holding an
+// older, potentially public file open must never see a newly issued host proof.
 func SaveState(dir string, state *State) error {
+	if err := protectStateDir(dir); err != nil {
+		return fmt.Errorf("protect state directory: %w", err)
+	}
+
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 
-	path := filepath.Join(dir, stateFileName)
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	file, err := os.CreateTemp(dir, ".state-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary state file: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+	}()
+	if err := protectStateFile(file); err != nil {
+		return fmt.Errorf("protect state file: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
 		return fmt.Errorf("write state file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync state file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close state file: %w", err)
+	}
+	if err := replaceStateFile(file.Name(), filepath.Join(dir, stateFileName)); err != nil {
+		return fmt.Errorf("replace state file: %w", err)
 	}
 
 	return nil

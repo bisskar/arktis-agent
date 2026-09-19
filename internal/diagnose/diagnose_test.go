@@ -3,10 +3,55 @@ package diagnose
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bisskar/arktis-agent/internal/protocol"
+	"github.com/gorilla/websocket"
 )
+
+func TestAuthCheckDoesNotAdvertiseHostProofCapability(t *testing.T) {
+	registrations := make(chan protocol.RegisterMessage, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		var registration protocol.RegisterMessage
+		if err := conn.ReadJSON(&registration); err != nil {
+			t.Errorf("read registration: %v", err)
+			return
+		}
+		registrations <- registration
+		if err := conn.WriteJSON(protocol.AckMessage{Type: "ack", HostID: "diagnosed"}); err != nil {
+			t.Errorf("write ack: %v", err)
+		}
+	}))
+	defer backend.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(backend.URL, "http"),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := authCheck(conn, "registration-key"); err != nil {
+		t.Fatalf("authCheck: %v", err)
+	}
+	if registration := <-registrations; registration.HostProofCapable {
+		t.Fatal("diagnostic registration advertised proof support without persistent state")
+	}
+}
 
 // TestRunRejectsInvalidURL ensures the diagnose path bails before doing
 // any I/O when the URL is malformed. The verdict line must name the
