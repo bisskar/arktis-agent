@@ -1,4 +1,4 @@
-# rendered by orch from projects/arktis-agent.yaml (render 152066db1330); do not edit, change the manifest and re-run orch render
+# rendered by orch from projects/arktis-agent.yaml (render f4b31668d903); do not edit, change the manifest and re-run orch render
 #
 # The CI mirror of the merge gate. The decision is lib/gate-query.ts in the
 # marketplace, the same call the merge hook makes; this job publishes it as a
@@ -52,19 +52,28 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Base revision (the contract that names the trusted reviewers)
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
       - name: Central config (the gate lives in the marketplace)
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: bisskar/ai_orchestrator
-          ref: 41cc14cff64c57efb8b3b6ee25a7aed8d0f6f8e8 # plugins/gate@0.2.11, the release this repo installs; tags are never moved, commits cannot be
+          ref: 736c92ad7aa157c74d01641ec29e5fdb8d5d3fb3 # plugins/gate@0.2.15, the release this repo installs; tags are never moved, commits cannot be
           path: .orch
           token: ${{ secrets.ORCH_TOKEN }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        # setup-bun installs into homedir()/.bun/bin with no input to move it,
+        # and every runner instance on a self-hosted host shares that one
+        # binary: another job swapped it under a running one (Text file busy).
+        # HOME for this step only puts it in the job's temp dir, which the
+        # action prepends to PATH; no-cache because that path is per instance.
+        env:
+          HOME: ${{ runner.temp }}/setup-bun-home
+        with:
+          no-cache: true
       - name: Evaluate and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
