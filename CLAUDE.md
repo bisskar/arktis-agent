@@ -1,13 +1,13 @@
 # arktis-agent
 
 <!-- orch:begin -->
-<!-- rendered by orch from projects/arktis-agent.yaml (render 152066db1330); do not edit inside the markers, change the manifest and re-run orch render -->
+<!-- rendered by orch from projects/arktis-agent.yaml (render f4b31668d903); do not edit inside the markers, change the manifest and re-run orch render -->
 ## How work moves in arktis-agent
 
 Another agent session is always already running in this repository. The full doctrine is in the `core:*` skills; this is the part every session holds from the first prompt.
 
 ### Non-negotiables
-An instruction to execute a plan, implement work, or fix a GitHub issue authorizes the full `core:autonomous-workflow`: worktree, implementation, tests, commit, two independent reviews, PR, CI/findings repair, and verified merge to the integration branch. Continue without another merge confirmation. An open PR or background watcher is not completion. Never dispatch production. Checkpoint and resume through `orch workflow`; only a concrete external blocker may end an incomplete run.
+An instruction to execute a plan, implement work, or fix a GitHub issue authorizes the full `core:autonomous-workflow`: worktree, implementation, tests, commit, two independent reviews, PR, CI/findings repair, and verified merge to the integration branch. Continue without another merge confirmation. An open PR or background watcher is not completion. Never dispatch production. Checkpoint and resume through `orch workflow`; only a concrete external blocker may end an incomplete run. A session started with `ORCH_ASSIGNMENT` set is a delegated worker and follows `core:worker-workflow` instead, stopping at `ready-for-review`.
 1. The primary checkout stays on `main` and is read-only. Claude enters a managed `.claude/worktrees/` checkout with pathless `EnterWorktree`; Codex uses `../arktis-agent-worktrees/<slug>/`, absolute `git -C` targets, then resolves `orch` with `command -v orch` and invokes that literal absolute launcher-pinned path for `pr create --worktree <absolute-path>` / `pr merge --worktree <absolute-path>`, because hook input cannot see per-call workdir (`/core:session-worktree`). One branch, one worktree.
 2. Start every session at the root of the checkout or worktree so both vendors load the project instructions. Hooks resolve the root contract even when a later tool runs in a subdirectory.
 3. `git stash` is repo-global: never `pop` or `apply` without an explicit ref.
